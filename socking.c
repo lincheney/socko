@@ -494,7 +494,9 @@ int main(int argc, char** argv) {
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         raise(SIGSTOP);
         execvp(argv[1], argv+1);
-        return 0;
+        // unreachable
+        perror(argv[1]);
+        return 1;
     }
 
     int rc = 0;
