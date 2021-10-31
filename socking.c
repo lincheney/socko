@@ -99,6 +99,7 @@ typedef struct {
         MAKE_MMAP,
         CONNECT_IPV4_SOCKET,
         POST_CONNECT_IPV4,
+        POST_MMAP,
         SEND_HANDSHAKE_POLL,
         SEND_HANDSHAKE,
         RECV_HANDSHAKE_POLL_FIRST,
@@ -199,7 +200,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 set_syscall_return_code(pid, regs.rax);
                 state.next = DONE;
             } else {
-                state.next = MAKE_MMAP;
+                if (state.mmap_addr) {
+                    state.next = SEND_HANDSHAKE_POLL;
+                } else {
+                    state.next = MAKE_MMAP;
+                }
                 return execute_state_machine(state, pid, regs);
             }
             break;
@@ -214,7 +219,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
-            // TODO close the old fd
             state.reg_state = syscall_wrapper(pid, SYS_dup2, rc, state.sock_fd, 0, 0, 0, 0);
             state.next = CONNECT_IPV4_SOCKET;
             break;
@@ -250,18 +254,21 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
-            state.next = MAKE_MMAP;
+            if (state.mmap_addr) {
+                state.next = SEND_HANDSHAKE_POLL;
+            } else {
+                state.next = MAKE_MMAP;
+            }
             return execute_state_machine(state, pid, regs);
         }
 
         case MAKE_MMAP: {
             state.reg_state = syscall_wrapper(pid, SYS_mmap, 0, 1024, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, 0, 0);
-            state.next = SEND_HANDSHAKE_POLL;
+            state.next = POST_MMAP;
             break;
         }
 
-        case SEND_HANDSHAKE_POLL: {
-            // TODO don't make new mmap for same pid
+        case POST_MMAP: {
             state.mmap_addr = post_syscall(pid, state.reg_state);
             if ((void*)state.mmap_addr == MAP_FAILED) {
                 set_syscall_return_code(pid, rc);
@@ -270,7 +277,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             }
 
             state.mmap_addr_after_pollfd = state.mmap_addr + POLLFD_SIZE;
+            state.next = SEND_HANDSHAKE_POLL;
+            break;
+        }
 
+        case SEND_HANDSHAKE_POLL: {
             char fds[POLLFD_SIZE];
             struct pollfd* pollfd = (struct pollfd*)fds;
             pollfd->fd = state.sock_fd;
@@ -441,6 +452,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             break;
         }
 
+        case DONE: {
+            ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
+            return state;
+        }
+
     }
 
     ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
@@ -459,11 +475,7 @@ ProcessArray processes = {0, 0, NULL};
 void handle_process(int index, pid_t pid, registers regs) {
     state oldstate = processes.data[index].state;
     state newstate = execute_state_machine(oldstate, pid, regs);
-    if (newstate.next == DONE) {
-        ProcessArray_delete(&processes, index);
-    } else {
-        processes.data[index].state = newstate;
-    }
+    processes.data[index].state = newstate;
 }
 
 unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
@@ -524,8 +536,12 @@ int main(int argc, char** argv) {
             case SYS_connect:
                 index = ProcessArray_find(&processes, pid);
                 if (index < 0) {
+                    // first time seeing process
                     process_state item = {pid, {START,}};
+                    item.state.mmap_addr = 0;
                     index = ProcessArray_append(&processes, item);
+                } else if (processes.data[index].state.next == DONE) {
+                    processes.data[index].state.next = START;
                 }
                 handle_process(index, pid, regs);
                 break;
