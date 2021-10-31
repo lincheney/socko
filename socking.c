@@ -1,15 +1,11 @@
 #include <sys/ptrace.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <sys/reg.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
-#include <sys/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <sys/mman.h>
 #include <poll.h>

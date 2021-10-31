@@ -1,9 +1,7 @@
 #define _GNU_SOURCE
 
 #include <netdb.h>
-#include <unistd.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <dlfcn.h>
 #include <string.h>
 
