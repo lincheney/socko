@@ -84,6 +84,13 @@ size_t post_syscall(pid_t pid, register_state state) {
     return regs.rax;
 }
 
+void set_syscall_return_code(pid_t pid, int rc) {
+    registers regs;
+    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+    regs.rax = rc;
+    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+}
+
 typedef struct {
     enum {
         START,
@@ -94,6 +101,7 @@ typedef struct {
         POST_CONNECT_IPV4,
         SEND_HANDSHAKE_POLL,
         SEND_HANDSHAKE,
+        RECV_HANDSHAKE_POLL_FIRST,
         RECV_HANDSHAKE_POLL,
         RECV_HANDSHAKE,
         POST_RECV_HANDSHAKE,
@@ -131,7 +139,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             int family = ((struct sockaddr*)address_buffer)->sa_family;
 
             // replace with 127.0.0.1:8888
-            printf("%i\n", family);
             state.next = POST_CONNECT;
             switch (family) {
                 case AF_INET: {
@@ -188,8 +195,10 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             if (state.is_ipv6) {
                 state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
                 state.next = MAKE_IPV4_SOCKET;
+            } else if (regs.rax < 0) {
+                set_syscall_return_code(pid, regs.rax);
+                state.next = DONE;
             } else {
-                // TODO error (regs.rax)
                 state.next = MAKE_MMAP;
                 return execute_state_machine(state, pid, regs);
             }
@@ -199,7 +208,12 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         case MAKE_IPV4_SOCKET: {
             rc = post_syscall(pid, state.reg_state);
             printf("socket() == %i\n", rc);
-            // TODO error
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
             // TODO close the old fd
             state.reg_state = syscall_wrapper(pid, SYS_dup2, rc, state.sock_fd, 0, 0, 0, 0);
             state.next = CONNECT_IPV4_SOCKET;
@@ -207,10 +221,13 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case CONNECT_IPV4_SOCKET: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
             printf("dup2() == %i\n", rc);
-
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
             char* address_buffer = alloca(ALIGNED_SIZE(sizeof(struct sockaddr_in)));
             struct sockaddr_in* address = (void*)address_buffer;
             address->sin_family = AF_INET;
@@ -225,9 +242,14 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case POST_CONNECT_IPV4: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
             printf("connect() == %i\n", rc);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
             state.next = MAKE_MMAP;
             return execute_state_machine(state, pid, regs);
         }
@@ -239,9 +261,14 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case SEND_HANDSHAKE_POLL: {
-            // TODO error
             // TODO don't make new mmap for same pid
             state.mmap_addr = post_syscall(pid, state.reg_state);
+            if ((void*)state.mmap_addr == MAP_FAILED) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
             state.mmap_addr_after_pollfd = state.mmap_addr + POLLFD_SIZE;
 
             char fds[POLLFD_SIZE];
@@ -256,8 +283,13 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case SEND_HANDSHAKE: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
+            /* printf("poll() == %i\n", rc); */
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
 
             // replace with sendto
             char request[1024] =
@@ -272,15 +304,20 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             put_data(pid, state.mmap_addr_after_pollfd, request, sizeof(request)/WORD_SIZE);
             state.reg_state = syscall_wrapper(pid, SYS_sendto, state.sock_fd, state.mmap_addr_after_pollfd, 6+state.address_len, 0, 0, 0);
             state.to_receive = 6;
-            state.next = RECV_HANDSHAKE_POLL;
+            state.next = RECV_HANDSHAKE_POLL_FIRST;
             break;
         }
 
-        case RECV_HANDSHAKE_POLL: {
-            // TODO error
+        case RECV_HANDSHAKE_POLL_FIRST:
             rc = post_syscall(pid, state.reg_state);
-            printf("sendto/poll() == %i\n", rc);
+            /* printf("sendto/poll() == %i\n", rc); */
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
 
+        case RECV_HANDSHAKE_POLL: {
             char fds[POLLFD_SIZE];
             struct pollfd* pollfd = (struct pollfd*)fds;
             pollfd->fd = state.sock_fd;
@@ -293,8 +330,12 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case RECV_HANDSHAKE: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
 
             state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.mmap_addr_after_pollfd+6-state.to_receive, state.to_receive, 0, 0, 0);
             state.next = POST_RECV_HANDSHAKE;
@@ -302,16 +343,21 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case POST_RECV_HANDSHAKE: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
             state.to_receive -= rc;
             if (rc == 0) {
-                // TODO connection closed
-                puts("CONNECTION CLOSED");
+                set_syscall_return_code(pid, ECONNRESET);
+                state.next = DONE;
             } else if (state.to_receive == 0) {
                 char buffer[WORD_SIZE];
                 get_data(pid, state.mmap_addr_after_pollfd, buffer, sizeof(buffer)/WORD_SIZE);
-                printf("%i %i %i %i %i %i\n", buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5]);
+                // TODO don't use asserts
                 assert(buffer[0] == 0x05);
                 assert(buffer[1] == 0x00);
                 assert(buffer[2] == 0x05);
@@ -341,6 +387,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         case RECV_ADDRESS_POLL:
             // TODO error
             rc = post_syscall(pid, state.reg_state);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
 
         case RECV_ADDRESS_POLL_FIRST: {
             char fds[POLLFD_SIZE];
@@ -357,6 +408,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         case RECV_ADDRESS: {
             // TODO error
             rc = post_syscall(pid, state.reg_state);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
 
             // drop the data
             state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.mmap_addr_after_pollfd, state.to_receive, 0, 0, 0);
@@ -365,11 +421,17 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case POST_RECV_ADDRESS: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
             state.to_receive -= rc;
             if (rc == 0) {
-                // TODO connection closed
+                set_syscall_return_code(pid, ECONNRESET);
+                state.next = DONE;
             } else if (state.to_receive == 0) {
                 ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
                 state.next = DONE;
@@ -422,6 +484,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    int rc = 0;
     int first = 1;
     while (1) {
         int status;
@@ -431,10 +494,11 @@ int main(int argc, char** argv) {
             break;
         } else if (pid < 0) {
             perror("waitpid() failed");
-            exit(1);
+            return 1;
         }
 
         if (WIFEXITED(status)) {
+            rc = WEXITSTATUS(status);
             // process exited
             int index = ProcessArray_find(&processes, pid);
             if (index >= 0) {
@@ -446,7 +510,7 @@ int main(int argc, char** argv) {
         if (first) {
             if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGSTOP) {
                 perror("not stopped");
-                exit(1);
+                return 1;
             }
             ptrace(PTRACE_SETOPTIONS, pid, 0, ptrace_options);
             ptrace(PTRACE_SYSCALL, pid, 0, 0);
@@ -475,5 +539,5 @@ int main(int argc, char** argv) {
                 break;
         }
     }
-    return 0;
+    return rc;
 }
