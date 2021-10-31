@@ -428,8 +428,7 @@ int main(int argc, char** argv) {
         setenv("LD_PRELOAD", ld_preload, 1);
 
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-        /* execl("/bin/curl", "curl", "google.com", NULL); */
-        execl("/bin/curl", "curl", argv[1], "ifconfig.co", "-Zv", NULL);
+        execvp(argv[1], argv+1);
         return 0;
     }
 
