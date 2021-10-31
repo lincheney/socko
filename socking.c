@@ -508,6 +508,10 @@ int main(int argc, char** argv) {
                 break;
             case 'l':
                 lib = optarg;
+                if (access(lib, F_OK )) {
+                    perror("Error: invalid argument to -l");
+                    return 2;
+                }
                 break;
             case '?':
                 print_help(2, argv);
