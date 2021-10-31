@@ -191,7 +191,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case POST_CONNECT: {
-            printf("connect() == %i\n", regs.rax);
+            /* printf("connect() == %i\n", regs.rax); */
             if (state.is_ipv6) {
                 state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
                 state.next = MAKE_IPV4_SOCKET;
@@ -211,7 +211,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case MAKE_IPV4_SOCKET: {
             rc = post_syscall(pid, state.reg_state);
-            printf("socket() == %i\n", rc);
+            /* printf("socket() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -225,7 +225,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case CONNECT_IPV4_SOCKET: {
             rc = post_syscall(pid, state.reg_state);
-            printf("dup2() == %i\n", rc);
+            /* printf("dup2() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -246,7 +246,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_CONNECT_IPV4: {
             rc = post_syscall(pid, state.reg_state);
-            printf("connect() == %i\n", rc);
+            /* printf("connect() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -398,7 +398,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case RECV_ADDRESS_POLL:
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
@@ -419,7 +418,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case RECV_ADDRESS: {
-            // TODO error
             rc = post_syscall(pid, state.reg_state);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
