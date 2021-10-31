@@ -23,6 +23,9 @@
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define POLLFD_SIZE ALIGNED_SIZE(sizeof(struct pollfd))
 
+uint32_t proxy_host;
+int proxy_port;
+
 void get_data(pid_t child, size_t addr, char* buffer, int count) {
     size_t* _buffer = (size_t*)buffer;
     for (int i = 0; i < count; i++) {
@@ -139,7 +142,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
             int family = ((struct sockaddr*)address_buffer)->sa_family;
 
-            // replace with 127.0.0.1:8888
             state.next = POST_CONNECT;
             switch (family) {
                 case AF_INET: {
@@ -149,8 +151,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     *(uint32_t*)(state.address+1) = address->sin_addr.s_addr;
                     *(uint16_t*)(state.address+state.address_len-2) = address->sin_port;
 
-                    inet_pton(family, "127.0.0.1", &(address->sin_addr));
-                    address->sin_port = htons(8888);
+                    address->sin_addr.s_addr = proxy_host;
+                    address->sin_port = htons(proxy_port);
                     put_data(pid, addr_ptr, address_buffer, ALIGNED_SIZE(addr_len)/WORD_SIZE);
                     break;
                 }
@@ -231,8 +233,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             char* address_buffer = alloca(ALIGNED_SIZE(sizeof(struct sockaddr_in)));
             struct sockaddr_in* address = (void*)address_buffer;
             address->sin_family = AF_INET;
-            address->sin_port = htons(8888);
-            inet_pton(AF_INET, "127.0.0.1", &(address->sin_addr));
+            address->sin_port = htons(proxy_port);
+            address->sin_addr.s_addr = proxy_host;
             size_t addr_ptr = state.reg_state.old_regs.rsi;
 
             put_data(pid, addr_ptr,address_buffer, ALIGNED_SIZE(sizeof(struct sockaddr_in))/WORD_SIZE);
@@ -491,33 +493,37 @@ Both -p and -l are required arguments.\
 }
 
 int main(int argc, char** argv) {
-    char* proxy = NULL;
     char* lib = NULL;
     int flag;
     opterr = 0;
     while ((flag = getopt(argc, argv, "+hp:l:")) != -1) {
         switch (flag) {
             case 'p':
-                proxy = optarg;
+                char* host = strtok(optarg, ":");
+                optarg = strtok(NULL, "");
+                if (!host || sscanf(optarg, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
+                    dprintf(2, "Error: invalid argument proxy argument to -p");
+                    return 2;
+                }
                 break;
             case 'l':
                 lib = optarg;
                 break;
             case '?':
                 print_help(2, argv);
-                return 1;
+                return 2;
             case 'h':
                 print_help(1, argv);
                 return 0;
         }
     }
-    if (! proxy || ! lib) {
+    if (! proxy_host || ! lib) {
         print_help(2, argv);
-        return 1;
+        return 2;
     }
     if (optind == argc) {
         dprintf(2, "Error: no commands given");
-        return 1;
+        return 2;
     }
 
     pid_t tracer_pid = getpid();
