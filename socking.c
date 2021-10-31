@@ -163,7 +163,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     state.is_ipv6 = 1;
                     struct sockaddr_in6* address = (void*)address_buffer;
 
-                    if (address->sin6_port == 0xffff) {
+                    if (address->sin6_port == 0) {
                         // hijack
                         struct {
                             size_t name_ptr;

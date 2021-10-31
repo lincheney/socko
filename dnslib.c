@@ -58,7 +58,7 @@ extern int getaddrinfo (const char *restrict name,
             address->ai_addrlen = sizeof(struct sockaddr_in6);
             struct sockaddr_in6* addr6 = malloc(address->ai_addrlen);
             addr6->sin6_family = AF_INET6;
-            addr6->sin6_port = 0xffff;
+            addr6->sin6_port = 0;
             addr6->sin6_flowinfo = 0;
             memcpy(addr6->sin6_addr.s6_addr, &address_data, sizeof(address_data));
             addr6->sin6_scope_id = 0;
