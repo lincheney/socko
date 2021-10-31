@@ -478,21 +478,63 @@ void handle_process(int index, pid_t pid, registers regs) {
 
 unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
 
+void print_help(int fd, char** argv) {
+    dprintf(fd,
+"%s -p PROXY:PORT -l DNSLIB -- COMMAND [ARGS...]\n\
+\n\
+Tunnel COMMAND through the PROXY on PORT.\n\
+\n\
+DNSLIB will be used to intercept DNS lookups via LD_PRELOAD.\n\
+\n\
+Both -p and -l are required arguments.\
+", argv[0]);
+}
+
 int main(int argc, char** argv) {
+    char* proxy = NULL;
+    char* lib = NULL;
+    int flag;
+    opterr = 0;
+    while ((flag = getopt(argc, argv, "+hp:l:")) != -1) {
+        switch (flag) {
+            case 'p':
+                proxy = optarg;
+                break;
+            case 'l':
+                lib = optarg;
+                break;
+            case '?':
+                print_help(2, argv);
+                return 1;
+            case 'h':
+                print_help(1, argv);
+                return 0;
+        }
+    }
+    if (! proxy || ! lib) {
+        print_help(2, argv);
+        return 1;
+    }
+    if (optind == argc) {
+        dprintf(2, "Error: no commands given");
+        return 1;
+    }
 
     pid_t tracer_pid = getpid();
 
     pid_t child = fork();
     if (child == 0) {
-        char ld_preload[1024] = "/home/qianli/Documents/repos/socking/dnslib.so:";
-        strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload));
+        char ld_preload[1024] = "";
+        strncat(ld_preload, lib, sizeof(ld_preload)-1);
+        strncat(ld_preload, ":", sizeof(ld_preload)-1);
+        strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload)-1);
         setenv("LD_PRELOAD", ld_preload, 1);
 
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         raise(SIGSTOP);
-        execvp(argv[1], argv+1);
+        execvp(argv[optind], argv+optind);
         // unreachable
-        perror(argv[1]);
+        perror(argv[optind]);
         return 1;
     }
 
