@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "array.c"
+#include "shared.h"
 
 int (*real_getaddrinfo)(const char*, const char*, const void*, void*);
 
@@ -44,11 +45,7 @@ extern int getaddrinfo (const char *restrict name,
                 index = AddressArray_append(&addresses, strdup(name));
             }
 
-            struct {
-                void* name_ptr;
-                uint16_t len;
-                uint16_t port;
-            } address_data = {addresses.data[index], name_len, port};
+            addrinfo_data address_data = {addresses.data[index], name_len, port};
 
             struct addrinfo* address = malloc(sizeof(struct addrinfo));
             address->ai_flags = 0;
@@ -58,10 +55,10 @@ extern int getaddrinfo (const char *restrict name,
             address->ai_addrlen = sizeof(struct sockaddr_in6);
             struct sockaddr_in6* addr6 = malloc(address->ai_addrlen);
             addr6->sin6_family = AF_INET6;
-            addr6->sin6_port = 0;
+            addr6->sin6_port = port;
             addr6->sin6_flowinfo = 0;
             memcpy(addr6->sin6_addr.s6_addr, &address_data, sizeof(address_data));
-            addr6->sin6_scope_id = 0;
+            addr6->sin6_scope_id = SCOPE_ID;
             address->ai_addr = (struct sockaddr*)addr6;
             address->ai_canonname = NULL;
             address->ai_next = NULL;

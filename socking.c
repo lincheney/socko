@@ -16,6 +16,7 @@
 #include <errno.h>
 
 #include "array.c"
+#include "shared.h"
 
 #define WORD_SIZE sizeof(size_t)
 #define ALIGNED_SIZE(x) ((x) + (x) % -WORD_SIZE)
@@ -158,17 +159,13 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     state.is_ipv6 = 1;
                     struct sockaddr_in6* address = (void*)address_buffer;
 
-                    if (address->sin6_port == 0) {
+                    if (address->sin6_scope_id == SCOPE_ID) {
                         // hijack
-                        struct {
-                            size_t name_ptr;
-                            uint16_t len;
-                            uint16_t port;
-                        } *data = (void*)address->sin6_addr.s6_addr;
+                        addrinfo_data *data = (void*)address->sin6_addr.s6_addr;
                         state.address_len = 1 + 1 + data->len - 1 + 2;
                         state.address[0] = 0x03;
                         state.address[1] = data->len - 1;
-                        get_data(pid, data->name_ptr, state.address+2, ALIGNED_SIZE(data->len-1)/WORD_SIZE);
+                        get_data(pid, (size_t)(data->name_ptr), state.address+2, ALIGNED_SIZE(data->len-1)/WORD_SIZE);
                         *(uint16_t*)(state.address+state.address_len-2) = data->port;
 
                     } else {
