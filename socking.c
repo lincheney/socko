@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <netinet/ip.h>
-#include <assert.h>
 #include <arpa/inet.h>
 #include <sys/mman.h>
 #include <poll.h>
@@ -368,12 +367,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             } else if (state.to_receive == 0) {
                 char buffer[WORD_SIZE];
                 get_data(pid, state.mmap_addr_after_pollfd, buffer, sizeof(buffer)/WORD_SIZE);
-                // TODO don't use asserts
-                assert(buffer[0] == 0x05);
-                assert(buffer[1] == 0x00);
-                assert(buffer[2] == 0x05);
-                assert(buffer[3] == 0x00);
-                assert(buffer[4] == 0x00);
+                if (buffer[0] != 0x05 || buffer[1] != 0x00 || buffer[2] != 0x05 || buffer[3] != 0x00 || buffer[4] != 0x00) {
+                    set_syscall_return_code(pid, ECONNRESET);
+                    state.next = DONE;
+                    goto finish_state;
+                }
                 int to_read;
                 switch (buffer[5]) {
                     case 0x01:
@@ -385,6 +383,10 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     case 0x04:
                         state.to_receive = 16+2;
                         break;
+                    default:
+                        set_syscall_return_code(pid, ECONNRESET);
+                        state.next = DONE;
+                        goto finish_state;
                 }
                 state.next = RECV_ADDRESS_POLL_FIRST;
                 return execute_state_machine(state, pid, regs);
@@ -459,6 +461,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
     }
 
+finish_state:
     ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
     return state;
 }
