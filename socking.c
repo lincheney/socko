@@ -529,6 +529,11 @@ int main(int argc, char** argv) {
     pid_t tracer_pid = getpid();
 
     pid_t child = fork();
+    if (child < 0) {
+        perror("Failed to fork");
+        return 1;
+    }
+
     if (child == 0) {
         char ld_preload[1024] = "";
         strncat(ld_preload, lib, sizeof(ld_preload)-1);
