@@ -26,7 +26,7 @@ extern int getaddrinfo (const char *restrict name,
 			const struct addrinfo *restrict req,
 			struct addrinfo **restrict result) {
     if (real_getaddrinfo) {
-        printf("getaddrinfo(%s, %s)\n", name, service);
+        /* printf("getaddrinfo(%s, %s)\n", name, service); */
 
         if (name) {
             uint16_t port = 0;
