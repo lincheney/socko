@@ -16,6 +16,8 @@
 #include <poll.h>
 #include <signal.h>
 
+#include "array.c"
+
 #define WORD_SIZE sizeof(size_t)
 #define ALIGNED_SIZE(x) ((x) + (x) % -WORD_SIZE)
 #define max(a, b) ((a) > (b) ? (a) : (b))
@@ -394,56 +396,18 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 typedef struct {
     pid_t pid;
     state state;
-} process_item;
+} process_state;
 
-struct {
-    size_t length;
-    size_t capacity;
-    process_item* data;
-} processes = {0, 0, NULL};
-
-int get_process(pid_t pid) {
-    for (int i = 0; i < processes.length; i++) {
-        if (processes.data[i].pid == pid) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-int append_process(pid_t pid) {
-    // resize if not enough space
-    if (processes.length >= processes.capacity) {
-        if (processes.capacity == 0) {
-            processes.capacity = 4;
-        } else {
-            processes.capacity *= 2;
-        }
-        processes.data = realloc(processes.data, processes.capacity*sizeof(process_item));
-    }
-
-    state state;
-    state.next = START;
-    process_item item = {pid, state};
-    processes.data[processes.length] = item;
-    processes.length += 1;
-    return processes.length-1;
-}
-
-void delete_process(int index) {
-    // just place last element in the deleted slot, rather than shifting everything
-    if (processes.length > 1) {
-        processes.data[index] = processes.data[processes.length-1];
-    }
-    processes.length--;
-}
+#define cmp_fn(key, value) ((key) == (value.pid))
+ARRAY_TYPE(ProcessArray, process_state, pid_t, cmp_fn);
+ProcessArray processes = {0, 0, NULL};
 
 void handle_process(int index, pid_t pid, registers regs) {
     state oldstate = processes.data[index].state;
     printf("%i\n", oldstate.next);
     state newstate = execute_state_machine(oldstate, pid, regs);
     if (newstate.next == DONE) {
-        delete_process(index);
+        ProcessArray_delete(&processes, index);
     } else {
         processes.data[index].state = newstate;
     }
@@ -491,14 +455,15 @@ int main(int argc, char** argv) {
                 ptrace(PTRACE_SYSCALL, child_waited, NULL, NULL);
                 break;
             case SYS_connect:
-                index = get_process(child_waited);
+                index = ProcessArray_find(&processes, child_waited);
                 if (index < 0) {
-                    index = append_process(child_waited);
+                    process_state item = {child_waited, {START,}};
+                    index = ProcessArray_append(&processes, item);
                 }
                 handle_process(index, child_waited, regs);
                 break;
             default:
-                index = get_process(child_waited);
+                index = ProcessArray_find(&processes, child_waited);
                 if (index >= 0) {
                     handle_process(index, child_waited, regs);
                 } else {

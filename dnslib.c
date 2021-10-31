@@ -7,6 +7,8 @@
 #include <dlfcn.h>
 #include <string.h>
 
+#include "array.c"
+
 int (*real_getaddrinfo)(const char*, const char*, const void*, void*);
 
 __attribute__((constructor))
@@ -14,37 +16,9 @@ static void init() {
     real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
 }
 
-struct {
-    size_t length;
-    size_t capacity;
-    char** names;
-} addresses = {0, 0, NULL};
-
-void* get_or_insert_address(const char* name, int name_len) {
-    // try to find existing address
-    for (int i = 0; i < addresses.length; i++) {
-        if (strncmp(name, addresses.names[i], name_len) == 0) {
-            return addresses.names[i];
-        }
-    }
-
-    // resize if not enough space
-    if (addresses.length >= addresses.capacity) {
-        if (addresses.capacity == 0) {
-            addresses.capacity = 4;
-        } else {
-            addresses.capacity *= 2;
-        }
-        addresses.names = realloc(addresses.names, addresses.capacity*sizeof(char*));
-    }
-    // make our own copy of the name
-    char* name_copy = malloc(name_len);
-    strncpy(name_copy, name, name_len);
-    // insert the new name
-    addresses.names[addresses.length] = name_copy;
-    addresses.length += 1;
-    return name_copy;
-}
+#define cmp_fn(key, value) (strcmp((key), (value)) == 0)
+ARRAY_TYPE(AddressArray, char*, char*, cmp_fn);
+AddressArray addresses = {0, 0, NULL};
 
 extern int getaddrinfo (const char *restrict name,
 			const char *restrict service,
@@ -65,11 +39,16 @@ extern int getaddrinfo (const char *restrict name,
             }
 
             uint16_t name_len = strlen(name) + 1;
+            int index = AddressArray_find(&addresses, name);
+            if (index < 0) {
+                index = AddressArray_append(&addresses, strdup(name));
+            }
+
             struct {
                 void* name_ptr;
                 uint16_t len;
                 uint16_t port;
-            } address_data = {get_or_insert_address(name, name_len), name_len, port};
+            } address_data = {addresses.data[index], name_len, port};
 
             struct addrinfo* address = malloc(sizeof(struct addrinfo));
             address->ai_flags = 0;
