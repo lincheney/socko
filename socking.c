@@ -14,7 +14,7 @@
 #include <arpa/inet.h>
 #include <sys/mman.h>
 #include <poll.h>
-#include <signal.h>
+#include <errno.h>
 
 #include "array.c"
 
@@ -36,19 +36,6 @@ size_t put_data(pid_t child, size_t addr, char* buffer, int count) {
         ptrace(PTRACE_POKEDATA, child, addr + i*WORD_SIZE, _buffer[i]);
     }
     return addr + count*WORD_SIZE;
-}
-
-size_t wait_child(pid_t child) {
-    int status;
-    pid_t child_waited = waitpid(-1, &status, WCONTINUED|WUNTRACED);
-    if (child_waited == child && WIFEXITED(status)) {
-        return -1;
-    }
-
-    if (! WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-        return 0;
-    }
-    return child_waited;
 }
 
 typedef struct user_regs_struct registers;
@@ -137,7 +124,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             state.sock_fd = regs.rdi;
             size_t addr_ptr = regs.rsi;
             size_t addr_len = regs.rdx;
-            printf("%p\n", addr_ptr);
 
             char* address_buffer = alloca(ALIGNED_SIZE(addr_len));
             get_data(pid, regs.rsi, address_buffer, ALIGNED_SIZE(addr_len)/WORD_SIZE);
@@ -145,6 +131,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             int family = ((struct sockaddr*)address_buffer)->sa_family;
 
             // replace with 127.0.0.1:8888
+            printf("%i\n", family);
+            state.next = POST_CONNECT;
             switch (family) {
                 case AF_INET: {
                     struct sockaddr_in* address = (struct sockaddr_in*)address_buffer;
@@ -188,12 +176,15 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     put_data(pid, addr_ptr, address_buffer, ALIGNED_SIZE(addr_len)/WORD_SIZE);
                     break;
                 }
+                default:
+                    state.next = DONE;
+                    break;
             }
-            state.next = POST_CONNECT;
             break;
         }
 
         case POST_CONNECT: {
+            printf("connect() == %i\n", regs.rax);
             if (state.is_ipv6) {
                 state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
                 state.next = MAKE_IPV4_SOCKET;
@@ -269,7 +260,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             rc = post_syscall(pid, state.reg_state);
 
             // replace with sendto
-            puts("sendto()");
             char request[1024] =
                 "\x05" // version
                 "\x01" // no. auth
@@ -289,6 +279,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         case RECV_HANDSHAKE_POLL: {
             // TODO error
             rc = post_syscall(pid, state.reg_state);
+            printf("sendto/poll() == %i\n", rc);
 
             char fds[POLLFD_SIZE];
             struct pollfd* pollfd = (struct pollfd*)fds;
@@ -316,6 +307,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             state.to_receive -= rc;
             if (rc == 0) {
                 // TODO connection closed
+                puts("CONNECTION CLOSED");
             } else if (state.to_receive == 0) {
                 char buffer[WORD_SIZE];
                 get_data(pid, state.mmap_addr_after_pollfd, buffer, sizeof(buffer)/WORD_SIZE);
@@ -404,7 +396,6 @@ ProcessArray processes = {0, 0, NULL};
 
 void handle_process(int index, pid_t pid, registers regs) {
     state oldstate = processes.data[index].state;
-    printf("%i\n", oldstate.next);
     state newstate = execute_state_machine(oldstate, pid, regs);
     if (newstate.next == DONE) {
         ProcessArray_delete(&processes, index);
@@ -413,60 +404,73 @@ void handle_process(int index, pid_t pid, registers regs) {
     }
 }
 
-int main(int argc, char** argv) {
-    pid_t child;
+unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
 
-    unsigned int ptrace_setoptions = PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT;
-    ptrace_setoptions |= PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
+int main(int argc, char** argv) {
 
     pid_t tracer_pid = getpid();
 
-    child = fork();
+    pid_t child = fork();
     if (child == 0) {
-        char ld_preload[1024] = "/tmp/thing/stuff:";
+        char ld_preload[1024] = "/home/qianli/Documents/repos/socking/dnslib.so:";
         strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload));
         setenv("LD_PRELOAD", ld_preload, 1);
 
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+        raise(SIGSTOP);
         execvp(argv[1], argv+1);
         return 0;
     }
 
-    registers regs;
-    long newpid;
-
+    int first = 1;
     while (1) {
-        pid_t child_waited = wait_child(child);
-        if (child_waited < 0) {
+        int status;
+        pid_t pid = waitpid(-1, &status, 0);
+
+        if (pid < 0 && errno == ECHILD) {
             break;
-        } else if (child_waited == 0) {
+        } else if (pid < 0) {
+            perror("waitpid() failed");
+            exit(1);
+        }
+
+        if (WIFEXITED(status)) {
+            // process exited
+            int index = ProcessArray_find(&processes, pid);
+            if (index >= 0) {
+                ProcessArray_delete(&processes, index);
+            }
             continue;
         }
 
-        ptrace(PTRACE_GETREGS, child_waited, NULL, &regs);
+        if (first) {
+            if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGSTOP) {
+                perror("not stopped");
+                exit(1);
+            }
+            ptrace(PTRACE_SETOPTIONS, pid, 0, ptrace_options);
+            ptrace(PTRACE_SYSCALL, pid, 0, 0);
+            first = 0;
+        }
+        registers regs;
+        ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
         int index = -1;
         switch (regs.orig_rax) {
-            case SYS_fork:
-            case SYS_vfork:
-            case SYS_clone:
-                ptrace(PTRACE_GETEVENTMSG, child_waited, NULL, &newpid);
-                ptrace(PTRACE_SYSCALL, newpid, NULL, NULL);
-                ptrace(PTRACE_SYSCALL, child_waited, NULL, NULL);
-                break;
             case SYS_connect:
-                index = ProcessArray_find(&processes, child_waited);
+                index = ProcessArray_find(&processes, pid);
                 if (index < 0) {
-                    process_state item = {child_waited, {START,}};
+                    process_state item = {pid, {START,}};
                     index = ProcessArray_append(&processes, item);
                 }
-                handle_process(index, child_waited, regs);
+                handle_process(index, pid, regs);
                 break;
             default:
-                index = ProcessArray_find(&processes, child_waited);
+                index = ProcessArray_find(&processes, pid);
                 if (index >= 0) {
-                    handle_process(index, child_waited, regs);
+                    handle_process(index, pid, regs);
                 } else {
-                    ptrace(PTRACE_SYSCALL, child_waited, NULL, NULL);
+                    ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
                 }
                 break;
         }
