@@ -1,7 +1,10 @@
-all: socking dnslib.so
+BINARY=socking
+LIBRARY=sockinglib.so
 
-socking: socking.c array.c shared.h
-	gcc socking.c -o socking
+all: ${BINARY} ${LIBRARY}
 
-dnslib.so: dnslib.c array.c shared.h
-	gcc dnslib.c -o dnslib.so -ldl -fPIC -shared
+${BINARY}: socking.c array.c shared.h
+	gcc socking.c -o $@
+
+${LIBRARY}: sockinglib.c array.c shared.h
+	gcc sockinglib.c -o $@ -ldl -fPIC -shared

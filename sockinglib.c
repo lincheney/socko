@@ -12,26 +12,52 @@
 #include "shared.h"
 
 int (*real_getaddrinfo)(const char*, const char*, const void*, void*);
+int hijack = 0;
 
 __attribute__((constructor))
 static void init(int argc, const char **argv) {
+    real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
+
     const char* socking_enabled = getenv("SOCKING_ENABLED");
     if (!socking_enabled || strcmp(socking_enabled, "1") != 0) {
-        setenv("SOCKING_ENABLED", "1", 1);
-
-        const char* argv_copy[argc+4];
-        argv_copy[0] = "./socking";
-        argv_copy[1] = "-p127.0.0.1:8888";
-        argv_copy[2] = "-l/home/qianli/Documents/repos/socking/dnslib.so";
-        for (int i = 0; i < argc; i++) {
-            argv_copy[i+3] = argv[i];
+        // get filename of this shared lib
+        Dl_info info;
+        if (dladdr(init, &info) == 0) {
+            dprintf(2, "Could not determine path to shared library\n");
+            return;
         }
-        argv_copy[argc+3] = NULL;
 
+        const char* socking_proxy = getenv("SOCKING_PROXY");
+        if (!socking_proxy) {
+            dprintf(2, "$SOCKING_PROXY has not been set\n");
+            return;
+        }
+
+        const char* socking_path = getenv("SOCKING_PATH");
+        if (!socking_path) {
+            dprintf(2, "$SOCKING_PATH has not been set\n");
+            return;
+        }
+
+        const char* argv_copy[argc+7];
+        argv_copy[0] = socking_path;
+        argv_copy[1] = "-p";
+        argv_copy[2] = socking_proxy;
+        argv_copy[3] = "-l";
+        argv_copy[4] = info.dli_fname;
+        for (int i = 0; i < argc; i++) {
+            argv_copy[i+5] = argv[i];
+        }
+        argv_copy[argc+5] = NULL;
+
+        setenv("SOCKING_ENABLED", "1", 1);
         execv(argv_copy[0], (char* const*)argv_copy);
+
+        setenv("SOCKING_ENABLED", "0", 1);
         perror("Cannot run socking");
+        return;
     }
-    real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
+    hijack = 1;
 }
 
 #define cmp_fn(key, value) (strcmp((key), (value)) == 0)
@@ -45,7 +71,7 @@ extern int getaddrinfo (const char *restrict name,
     if (real_getaddrinfo) {
         /* printf("getaddrinfo(%s, %s)\n", name, service); */
 
-        if (name) {
+        if (hijack && name) {
             uint16_t port = 0;
             if (service) {
                 struct servent* serv = getservbyname(service, NULL);
