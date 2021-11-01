@@ -545,6 +545,8 @@ int main(int argc, char** argv) {
         strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload)-1);
         setenv("LD_PRELOAD", ld_preload, 1);
 
+        setenv("SOCKING_ENABLED", "1", 1);
+
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         raise(SIGSTOP);
         execvp(argv[optind], argv+optind);
@@ -576,19 +578,39 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        if (first) {
-            if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGSTOP) {
+        int signal = WSTOPSIG(status);
+        int index = ProcessArray_find(&processes, pid);
+        if (index < 0) {
+            if (!WIFSTOPPED(status) || signal != SIGSTOP) {
                 perror("not stopped");
                 return 1;
             }
+
+            // first time seeing process
+            process_state item = {pid, {START,}};
+            item.state.mmap_addr = 0;
+            index = ProcessArray_append(&processes, item);
             ptrace(PTRACE_SETOPTIONS, pid, 0, ptrace_options);
             ptrace(PTRACE_SYSCALL, pid, 0, 0);
-            first = 0;
+            continue;
         }
+
+        if (signal >> 8 && (signal & 0xff) == SIGTRAP) {
+            // ptrace event
+            ptrace(PTRACE_SYSCALL, pid, NULL, 0);
+            continue;
+        }
+
+        if ((signal & ~0x80) != SIGTRAP) {
+            // send the signal over
+            ptrace(PTRACE_SYSCALL, pid, NULL, signal);
+            continue;
+        }
+
         registers regs;
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
-        int index = -1;
+        index = -1;
         switch (regs.orig_rax) {
             case SYS_connect:
                 index = ProcessArray_find(&processes, pid);

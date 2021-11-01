@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <unistd.h>
+#include <linux/limits.h>
+#include <stdio.h>
 
 #include "array.c"
 #include "shared.h"
@@ -11,7 +14,23 @@
 int (*real_getaddrinfo)(const char*, const char*, const void*, void*);
 
 __attribute__((constructor))
-static void init() {
+static void init(int argc, const char **argv) {
+    const char* socking_enabled = getenv("SOCKING_ENABLED");
+    if (!socking_enabled || strcmp(socking_enabled, "1") != 0) {
+        setenv("SOCKING_ENABLED", "1", 1);
+
+        const char* argv_copy[argc+4];
+        argv_copy[0] = "./socking";
+        argv_copy[1] = "-p127.0.0.1:8888";
+        argv_copy[2] = "-l/home/qianli/Documents/repos/socking/dnslib.so";
+        for (int i = 0; i < argc; i++) {
+            argv_copy[i+3] = argv[i];
+        }
+        argv_copy[argc+3] = NULL;
+
+        execv(argv_copy[0], (char* const*)argv_copy);
+        perror("Cannot run socking");
+    }
     real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
 }
 
