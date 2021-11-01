@@ -20,7 +20,7 @@
 #define POLLFD_SIZE ALIGNED_SIZE(sizeof(struct pollfd))
 
 uint32_t proxy_host;
-int proxy_port;
+uint16_t proxy_port;
 
 void get_data(pid_t child, size_t addr, char* buffer, int count) {
     size_t* _buffer = (size_t*)buffer;
@@ -488,7 +488,7 @@ Tunnel COMMAND through the PROXY on PORT.\n\
 \n\
 DNSLIB will be used to intercept DNS lookups via LD_PRELOAD.\n\
 \n\
-Both -p and -l are required arguments.\
+Both -p and -l are required arguments.\n\
 ", argv[0]);
 }
 
@@ -501,8 +501,8 @@ int main(int argc, char** argv) {
             case 'p':
                 char* host = strtok(optarg, ":");
                 optarg = strtok(NULL, "");
-                if (!host || sscanf(optarg, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
-                    dprintf(2, "Error: invalid argument proxy argument to -p");
+                if (!host || !optarg || sscanf(optarg, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
+                    dprintf(2, "Error: invalid argument proxy argument to -p\n");
                     return 2;
                 }
                 break;
@@ -526,7 +526,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (optind == argc) {
-        dprintf(2, "Error: no commands given");
+        dprintf(2, "Error: no commands given\n");
         return 2;
     }
 
