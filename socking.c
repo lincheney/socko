@@ -164,14 +164,13 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                         state.address[0] = 0x03;
                         state.address[1] = data->len - 1;
                         get_data(pid, (size_t)(data->name_ptr), state.address+2, ALIGNED_SIZE(data->len-1)/WORD_SIZE);
-                        *(uint16_t*)(state.address+state.address_len-2) = data->port;
 
                     } else {
                         state.address_len = 1+16+2;
                         state.address[0] = 0x04;
                         memcpy(state.address+1, address->sin6_addr.s6_addr, 16);
-                        *(uint16_t*)(state.address+state.address_len-2) = address->sin6_port;
                     }
+                    *(uint16_t*)(state.address+state.address_len-2) = address->sin6_port;
 
                     // force the connect to fail
                     address->sin6_port = 0;
@@ -336,6 +335,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case RECV_HANDSHAKE: {
             rc = post_syscall(pid, state.reg_state);
+            /* printf("poll() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -349,6 +349,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_RECV_HANDSHAKE: {
             rc = post_syscall(pid, state.reg_state);
+            /* printf("recvfrom() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -394,6 +395,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case RECV_ADDRESS_POLL:
             rc = post_syscall(pid, state.reg_state);
+            /* printf("recvfrom() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -414,6 +416,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case RECV_ADDRESS: {
             rc = post_syscall(pid, state.reg_state);
+            /* printf("poll() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -428,6 +431,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_RECV_ADDRESS: {
             rc = post_syscall(pid, state.reg_state);
+            /* printf("recvfrom() == %i\n", rc); */
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
