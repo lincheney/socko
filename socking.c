@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -10,6 +12,9 @@
 #include <sys/mman.h>
 #include <poll.h>
 #include <errno.h>
+#include <netdb.h>
+#include <dlfcn.h>
+#include <unistd.h>
 
 #include "array.c"
 #include "shared.h"
@@ -21,6 +26,65 @@
 
 uint32_t proxy_host;
 uint16_t proxy_port;
+
+int (*real_getaddrinfo)(const char*, const char*, const void*, void*);
+int hijack = 0;
+#define cmp_fn(key, value) (strcmp((key), (value)) == 0)
+ARRAY_TYPE(AddressArray, char*, char*, cmp_fn);
+AddressArray addresses = {0, 0, NULL};
+
+extern int getaddrinfo (const char *restrict name,
+			const char *restrict service,
+			const struct addrinfo *restrict req,
+			struct addrinfo **restrict result) {
+    if (real_getaddrinfo) {
+        /* printf("getaddrinfo(%s, %s)\n", name, service); */
+
+        if (hijack && name) {
+            uint16_t port = 0;
+            if (service) {
+                struct servent* serv = getservbyname(service, NULL);
+                if (serv) {
+                    port = serv->s_port;
+                } else {
+                    port = htons(atoi(service ? service : "0"));
+                }
+            }
+
+            uint16_t name_len = strlen(name) + 1;
+            int index = AddressArray_find(&addresses, name);
+            if (index < 0) {
+                index = AddressArray_append(&addresses, strdup(name));
+            }
+
+            addrinfo_data address_data = {addresses.data[index], name_len, port};
+
+            struct addrinfo* address = malloc(sizeof(struct addrinfo));
+            address->ai_flags = 0;
+            address->ai_family = AF_INET6;
+            address->ai_socktype = SOCK_STREAM;
+            address->ai_protocol = IPPROTO_TCP;
+            address->ai_addrlen = sizeof(struct sockaddr_in6);
+            struct sockaddr_in6* addr6 = malloc(address->ai_addrlen);
+            addr6->sin6_family = AF_INET6;
+            addr6->sin6_port = port;
+            addr6->sin6_flowinfo = 0;
+            memcpy(addr6->sin6_addr.s6_addr, &address_data, sizeof(address_data));
+            addr6->sin6_scope_id = SCOPE_ID;
+            address->ai_addr = (struct sockaddr*)addr6;
+            address->ai_canonname = NULL;
+            address->ai_next = NULL;
+            *result = address;
+
+            return 0;
+        }
+
+
+        return real_getaddrinfo(name, service, req, result);
+    } else {
+        return EAI_FAIL;
+    }
+}
 
 void get_data(pid_t child, size_t addr, char* buffer, int count) {
     size_t* _buffer = (size_t*)buffer;
@@ -468,8 +532,8 @@ typedef struct {
     state state;
 } process_state;
 
-#define cmp_fn(key, value) ((key) == (value.pid))
-ARRAY_TYPE(ProcessArray, process_state, pid_t, cmp_fn);
+#define process_cmp_fn(key, value) ((key) == (value.pid))
+ARRAY_TYPE(ProcessArray, process_state, pid_t, process_cmp_fn);
 ProcessArray processes = {0, 0, NULL};
 
 void handle_process(int index, pid_t pid, registers regs) {
@@ -480,53 +544,33 @@ void handle_process(int index, pid_t pid, registers regs) {
 
 unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
 
-void print_help(int fd, char** argv) {
-    dprintf(fd,
-"%s -p PROXY:PORT -l DNSLIB -- COMMAND [ARGS...]\n\
-\n\
-Tunnel COMMAND through the PROXY on PORT.\n\
-\n\
-DNSLIB will be used to intercept DNS lookups via LD_PRELOAD.\n\
-\n\
-Both -p and -l are required arguments.\n\
-", argv[0]);
-}
+__attribute__((constructor))
+static void init(int argc, const char **argv) {
+    real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
 
-int main(int argc, char** argv) {
-    char* lib = NULL;
-    int flag;
-    opterr = 0;
-    while ((flag = getopt(argc, argv, "+hp:l:")) != -1) {
-        switch (flag) {
-            case 'p':
-                char* host = strtok(optarg, ":");
-                optarg = strtok(NULL, "");
-                if (!host || !optarg || sscanf(optarg, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
-                    dprintf(2, "Error: invalid argument proxy argument to -p\n");
-                    return 2;
-                }
-                break;
-            case 'l':
-                lib = optarg;
-                if (access(lib, F_OK )) {
-                    perror("Error: invalid argument to -l");
-                    return 2;
-                }
-                break;
-            case '?':
-                print_help(2, argv);
-                return 2;
-            case 'h':
-                print_help(1, argv);
-                return 0;
-        }
+    const char* socking_enabled = getenv("SOCKING_ENABLED");
+    if (socking_enabled && strcmp(socking_enabled, "1") == 0) {
+        hijack = 1;
+        return;
     }
-    if (! proxy_host || ! lib) {
-        print_help(2, argv);
-        return 2;
+
+    // get filename of this shared lib
+    Dl_info info;
+    if (dladdr(init, &info) == 0) {
+        dprintf(2, "Could not determine path to shared library\n");
+        return;
     }
-    if (optind == argc) {
-        dprintf(2, "Error: no commands given\n");
+
+    const char* socking_proxy = getenv("SOCKING_PROXY");
+    if (!socking_proxy) {
+        dprintf(2, "$SOCKING_PROXY has not been set\n");
+        return;
+    }
+    char* proxy = strdup(socking_proxy);
+    char* host = strtok(proxy, ":");
+    proxy = strtok(NULL, "");
+    if (!host || !proxy || sscanf(proxy, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
+        dprintf(2, "Error: invalid $SOCKING_PROXY: %s\n", socking_proxy);
         return 2;
     }
 
@@ -540,7 +584,7 @@ int main(int argc, char** argv) {
 
     if (child == 0) {
         char ld_preload[1024] = "";
-        strncat(ld_preload, lib, sizeof(ld_preload)-1);
+        strncat(ld_preload, info.dli_fname, sizeof(ld_preload)-1);
         strncat(ld_preload, ":", sizeof(ld_preload)-1);
         strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload)-1);
         setenv("LD_PRELOAD", ld_preload, 1);
@@ -549,9 +593,9 @@ int main(int argc, char** argv) {
 
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         raise(SIGSTOP);
-        execvp(argv[optind], argv+optind);
+        execvp(argv[0], (char *const*)argv);
         // unreachable
-        perror(argv[optind]);
+        perror(argv[0]);
         return 1;
     }
 
