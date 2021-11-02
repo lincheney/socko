@@ -24,7 +24,7 @@
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define POLLFD_SIZE ALIGNED_SIZE(sizeof(struct pollfd))
 
-unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
+unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESECCOMP | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
 
 // socks proxy address
 uint32_t proxy_host;
@@ -69,6 +69,7 @@ typedef struct {
     size_t mmap_addr;
     size_t mmap_addr_after_pollfd;
     int to_receive;
+    int in_syscall;
 } state;
 
 // lookup table for processes
@@ -523,7 +524,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 set_syscall_return_code(pid, -ECONNRESET);
                 state.next = DONE;
             } else if (state.to_receive == 0) {
-                ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
+                ptrace(PTRACE_CONT, pid, NULL, NULL);
                 state.next = DONE;
             } else {
                 state.next = RECV_ADDRESS_POLL;
@@ -531,15 +532,14 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             break;
         }
 
-        case DONE: {
-            ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
-            return state;
-        }
-
     }
 
 finish_state:
-    ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+    if (state.next == DONE) {
+        ptrace(PTRACE_CONT, pid, NULL, NULL);
+    } else {
+        ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
+    }
     return state;
 }
 
@@ -548,6 +548,9 @@ void handle_process(int index, pid_t pid, registers regs) {
     state newstate = execute_state_machine(oldstate, pid, regs);
     processes.data[index].state = newstate;
 }
+
+#include <sys/prctl.h>
+#include <seccomp.h>
 
 __attribute__((constructor))
 static void init(int argc, const char **argv) {
@@ -592,17 +595,31 @@ static void init(int argc, const char **argv) {
     }
 
     if (child == 0) {
-        char ld_preload[1024] = "";
-        strncat(ld_preload, info.dli_fname, sizeof(ld_preload)-1);
-        strncat(ld_preload, ":", sizeof(ld_preload)-1);
-        strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload)-1);
-        setenv("LD_PRELOAD", ld_preload, 1);
+        // this should already be LD_PRELOAD-ed, right?
+        /* char ld_preload[1024] = "LD_PRELOAD="; */
+        /* strncat(ld_preload, info.dli_fname, sizeof(ld_preload)-1); */
+        /* strncat(ld_preload, ":", sizeof(ld_preload)-1); */
+        /* if (!getenv("LD_PRELOAD")) { */
+            /* strncat(ld_preload, getenv("LD_PRELOAD"), sizeof(ld_preload)-1); */
+        /* } */
 
-        setenv("SOCKING_ENABLED", "1", 1);
+        int env_length;
+        for (env_length = 0; environ[env_length]; env_length++) ;
+        char* new_env[env_length+3];
+        memcpy(new_env, environ, sizeof(char*)*env_length);
+        new_env[env_length] = "SOCKING_ENABLED=1";
+        /* new_env[env_length+1] = ld_preload; */
+        new_env[env_length+2] = NULL;
+
+        scmp_filter_ctx ctx;
+        ctx = seccomp_init(SCMP_ACT_ALLOW);
+        seccomp_rule_add(ctx, SCMP_ACT_TRACE(0), SCMP_SYS(connect), 0);
+        seccomp_load(ctx);
 
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         raise(SIGSTOP);
-        execvp(argv[0], (char* const*)argv);
+        // must use execvpe, setenv/putenv doesn't work in some cases
+        execvpe(argv[0], (char* const*)argv, new_env);
         // unreachable
         perror(argv[0]);
         exit(1);
@@ -634,61 +651,60 @@ static void init(int argc, const char **argv) {
             continue;
         }
 
-        int signal = WSTOPSIG(status);
-        int index = ProcessArray_find(&processes, pid);
-        if (index < 0) {
-            if (!WIFSTOPPED(status) || signal != SIGSTOP) {
-                perror("Error: tracee not stopped");
+        int signal = (status >> 8) & 0xff;
+        int event = (status >> 16) & 0xff;
+        int is_syscall = signal == (0x80 | SIGTRAP);
+        signal &= ~0x80;
+
+        /* int signal = WSTOPSIG(status); */
+        int process_index = ProcessArray_find(&processes, pid);
+        if (process_index < 0) {
+            if (signal != SIGSTOP) {
+                dprintf(2, "Error: tracee not stopped\n");
                 exit(1);
             }
 
             // first time seeing process
-            process_state item = {pid, {START,}};
+            process_state item = {pid, {DONE,}};
             item.state.mmap_addr = 0;
-            index = ProcessArray_append(&processes, item);
+            item.state.in_syscall = 0;
+            process_index = ProcessArray_append(&processes, item);
             ptrace(PTRACE_SETOPTIONS, pid, 0, ptrace_options);
-            ptrace(PTRACE_SYSCALL, pid, 0, 0);
+            ptrace(PTRACE_CONT, pid, 0, 0);
             continue;
         }
 
-        if (signal >> 8 && (signal & 0xff) == SIGTRAP) {
-            // ptrace event
+        int ptrace_request = PTRACE_CONT;
+        if (processes.data[process_index].state.next != DONE) {
+            ptrace_request = PTRACE_SYSCALL;
+        }
+
+        if (!event && !is_syscall) {
+            ptrace(ptrace_request, pid, NULL, signal);
+            continue;
+        } else if (event && event != PTRACE_EVENT_SECCOMP) {
+            ptrace(ptrace_request, pid, NULL, 0);
+            continue;
+        }
+
+        if (event == PTRACE_EVENT_SECCOMP && processes.data[process_index].state.next == DONE) {
+            // start the state machine
+            processes.data[process_index].state.in_syscall = 1;
+            processes.data[process_index].state.next = START;
+        } else if (event == PTRACE_EVENT_SECCOMP) {
             ptrace(PTRACE_SYSCALL, pid, NULL, 0);
             continue;
-        }
-
-        if ((signal & ~0x80) != SIGTRAP) {
-            // send the signal over
-            ptrace(PTRACE_SYSCALL, pid, NULL, signal);
-            continue;
+        } else {
+            processes.data[process_index].state.in_syscall ^= 1;
+            if (processes.data[process_index].state.in_syscall) {
+                ptrace(PTRACE_SYSCALL, pid, NULL, 0);
+                continue;
+            }
         }
 
         registers regs;
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-
-        index = -1;
-        switch (regs.orig_rax) {
-            case SYS_connect:
-                index = ProcessArray_find(&processes, pid);
-                if (index < 0) {
-                    // first time seeing process
-                    process_state item = {pid, {START,}};
-                    item.state.mmap_addr = 0;
-                    index = ProcessArray_append(&processes, item);
-                } else if (processes.data[index].state.next == DONE) {
-                    processes.data[index].state.next = START;
-                }
-                handle_process(index, pid, regs);
-                break;
-            default:
-                index = ProcessArray_find(&processes, pid);
-                if (index >= 0) {
-                    handle_process(index, pid, regs);
-                } else {
-                    ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
-                }
-                break;
-        }
+        handle_process(process_index, pid, regs);
     }
     exit(rc);
 }

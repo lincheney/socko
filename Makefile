@@ -7,4 +7,4 @@ all: ${LIBRARY}
 	# gcc socking.c -o $@
 
 ${LIBRARY}: array.c shared.h socking.c
-	gcc socking.c -o $@ -ldl -fPIC -shared
+	gcc socking.c -o $@ -ldl -lseccomp -fPIC -shared
