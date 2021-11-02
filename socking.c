@@ -687,19 +687,27 @@ static void init(int argc, const char **argv) {
             continue;
         }
 
-        if (event == PTRACE_EVENT_SECCOMP && processes.data[process_index].state.next == DONE) {
-            // start the state machine
-            processes.data[process_index].state.in_syscall = 1;
-            processes.data[process_index].state.next = START;
-        } else if (event == PTRACE_EVENT_SECCOMP) {
+        /*
+         * connect() is the only syscall that we will get a SECCOMP event for
+         * what will happen is this:
+         * - the first connect() will get a seccomp event and a syscall exit
+         * - subsequent connect() will get a seccomp event, a syscall enter and syscall exit
+         * - other syscalls will get a syscall enter and a syscall exit
+         * except for that very first connect(), we want only the exit for all other syscalls (including the second connect())
+        */
+
+        if (event && processes.data[process_index].state.next != DONE) {
+            // skip non-first connect() seccomp events
             ptrace(PTRACE_SYSCALL, pid, NULL, 0);
             continue;
-        } else {
-            processes.data[process_index].state.in_syscall ^= 1;
-            if (processes.data[process_index].state.in_syscall) {
-                ptrace(PTRACE_SYSCALL, pid, NULL, 0);
-                continue;
-            }
+        }
+
+        processes.data[process_index].state.in_syscall ^= 1;
+        if (event) {
+            processes.data[process_index].state.next = START;
+        } else if (processes.data[process_index].state.in_syscall) {
+            ptrace(PTRACE_SYSCALL, pid, NULL, 0);
+            continue;
         }
 
         registers regs;
