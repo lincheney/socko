@@ -438,13 +438,13 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
             state.to_receive -= rc;
             if (rc == 0) {
-                set_syscall_return_code(pid, ECONNRESET);
+                set_syscall_return_code(pid, -ECONNRESET);
                 state.next = DONE;
             } else if (state.to_receive == 0) {
                 char buffer[WORD_SIZE];
                 get_data(pid, state.mmap_addr_after_pollfd, buffer, sizeof(buffer)/WORD_SIZE);
                 if (buffer[0] != 0x05 || buffer[1] != 0x00 || buffer[2] != 0x05 || buffer[3] != 0x00 || buffer[4] != 0x00) {
-                    set_syscall_return_code(pid, ECONNRESET);
+                    set_syscall_return_code(pid, -ECONNRESET);
                     state.next = DONE;
                     goto finish_state;
                 }
@@ -460,7 +460,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                         state.to_receive = 16+2;
                         break;
                     default:
-                        set_syscall_return_code(pid, ECONNRESET);
+                        set_syscall_return_code(pid, -ECONNRESET);
                         state.next = DONE;
                         goto finish_state;
                 }
@@ -520,7 +520,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
             state.to_receive -= rc;
             if (rc == 0) {
-                set_syscall_return_code(pid, ECONNRESET);
+                set_syscall_return_code(pid, -ECONNRESET);
                 state.next = DONE;
             } else if (state.to_receive == 0) {
                 ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
