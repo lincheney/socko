@@ -66,8 +66,8 @@ typedef struct {
     int address_len;
     char address[512];
     register_state reg_state;
-    size_t mmap_addr;
-    size_t mmap_addr_after_pollfd;
+    void* mmap_addr;
+    void* mmap_addr_after_pollfd;
     int to_receive;
     int in_syscall;
 } state;
@@ -142,19 +142,18 @@ extern int getaddrinfo(const char *restrict name,
     return EAI_FAIL;
 }
 
-void get_data(pid_t child, size_t addr, char* buffer, int count) {
-    size_t* _buffer = (size_t*)buffer;
-    for (int i = 0; i < count; i++) {
-        _buffer[i] = ptrace(PTRACE_PEEKTEXT, child, addr + i*WORD_SIZE, NULL);
-    }
+#include <sys/uio.h>
+void get_data(pid_t pid, void* addr, void* buffer, int count) {
+    struct iovec local_iov = {buffer, count};
+    struct iovec remote_iov = {(void*)addr, count};
+    process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0);
 }
 
-size_t put_data(pid_t child, size_t addr, char* buffer, int count) {
-    size_t* _buffer = (size_t*)buffer;
-    for (int i = 0; i < count; i++) {
-        ptrace(PTRACE_POKEDATA, child, addr + i*WORD_SIZE, _buffer[i]);
-    }
-    return addr + count*WORD_SIZE;
+void* put_data(pid_t pid, void* addr, void* buffer, int count) {
+    struct iovec local_iov = {buffer, count};
+    struct iovec remote_iov = {(void*)addr, count};
+    process_vm_writev(pid, &local_iov, 1, &remote_iov, 1, 0);
+    return addr + count;
 }
 
 register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
@@ -211,18 +210,16 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             state.is_ipv6 = 0;
 
             state.sock_fd = regs.rdi;
-            size_t addr_ptr = regs.rsi;
+            void* addr_ptr = (void*)regs.rsi;
             size_t addr_len = regs.rdx;
 
-            char* address_buffer = alloca(ALIGNED_SIZE(addr_len));
-            get_data(pid, regs.rsi, address_buffer, ALIGNED_SIZE(addr_len)/WORD_SIZE);
-
-            int family = ((struct sockaddr*)address_buffer)->sa_family;
+            struct sockaddr* address_buffer = alloca(addr_len);
+            get_data(pid, (void*)regs.rsi, address_buffer, addr_len);
 
             state.next = POST_CONNECT;
-            switch (family) {
+            switch (address_buffer->sa_family) {
                 case AF_INET: {
-                    struct sockaddr_in* address = (struct sockaddr_in*)address_buffer;
+                    struct sockaddr_in* address = (void*)address_buffer;
                     state.address_len = 1+4+2;
                     state.address[0] = 0x01;
                     *(uint32_t*)(state.address+1) = address->sin_addr.s_addr;
@@ -230,7 +227,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
                     address->sin_addr.s_addr = proxy_host;
                     address->sin_port = htons(proxy_port);
-                    put_data(pid, addr_ptr, address_buffer, ALIGNED_SIZE(addr_len)/WORD_SIZE);
+                    put_data(pid, addr_ptr, address_buffer, addr_len);
                     break;
                 }
 
@@ -244,7 +241,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                         state.address_len = 1 + 1 + data->len - 1 + 2;
                         state.address[0] = 0x03;
                         state.address[1] = data->len - 1;
-                        get_data(pid, (size_t)(data->name_ptr), state.address+2, ALIGNED_SIZE(data->len-1)/WORD_SIZE);
+                        get_data(pid, data->name_ptr, state.address+2, data->len-1);
 
                     } else {
                         state.address_len = 1+16+2;
@@ -255,7 +252,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
                     // force the connect to fail
                     address->sin6_port = 0;
-                    put_data(pid, addr_ptr, address_buffer, ALIGNED_SIZE(addr_len)/WORD_SIZE);
+                    put_data(pid, addr_ptr, address_buffer, addr_len);
                     break;
                 }
                 default:
@@ -306,14 +303,13 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 state.next = DONE;
                 break;
             }
-            char* address_buffer = alloca(ALIGNED_SIZE(sizeof(struct sockaddr_in)));
-            struct sockaddr_in* address = (void*)address_buffer;
-            address->sin_family = AF_INET;
-            address->sin_port = htons(proxy_port);
-            address->sin_addr.s_addr = proxy_host;
+            struct sockaddr_in address;
+            address.sin_family = AF_INET;
+            address.sin_port = htons(proxy_port);
+            address.sin_addr.s_addr = proxy_host;
             size_t addr_ptr = state.reg_state.old_regs.rsi;
 
-            put_data(pid, addr_ptr,address_buffer, ALIGNED_SIZE(sizeof(struct sockaddr_in))/WORD_SIZE);
+            put_data(pid, (void*)addr_ptr, &address, sizeof(address));
             state.reg_state = syscall_wrapper(pid, SYS_connect, state.sock_fd, addr_ptr, sizeof(struct sockaddr_in), 0, 0, 0);
             state.next = POST_CONNECT_IPV4;
             break;
@@ -343,8 +339,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case POST_MMAP: {
-            state.mmap_addr = post_syscall(pid, state.reg_state);
-            if ((void*)state.mmap_addr == MAP_FAILED) {
+            state.mmap_addr = (void*)post_syscall(pid, state.reg_state);
+            if (state.mmap_addr == MAP_FAILED) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
                 break;
@@ -356,13 +352,10 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case SEND_HANDSHAKE_POLL: {
-            char fds[POLLFD_SIZE];
-            struct pollfd* pollfd = (struct pollfd*)fds;
-            pollfd->fd = state.sock_fd;
-            pollfd->events = POLLOUT;
-            put_data(pid, state.mmap_addr, fds, POLLFD_SIZE/WORD_SIZE);
+            struct pollfd pollfd = {state.sock_fd, POLLOUT};
+            put_data(pid, state.mmap_addr, &pollfd, sizeof(pollfd));
 
-            state.reg_state = syscall_wrapper(pid, SYS_poll, state.mmap_addr, 1, -1, 0, 0, 0);
+            state.reg_state = syscall_wrapper(pid, SYS_poll, (size_t)state.mmap_addr, 1, -1, 0, 0, 0);
             state.next = SEND_HANDSHAKE;
             break;
         }
@@ -386,8 +379,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 "\x00" // reserved
                 ;
             memcpy(request+6, state.address, state.address_len);
-            put_data(pid, state.mmap_addr_after_pollfd, request, sizeof(request)/WORD_SIZE);
-            state.reg_state = syscall_wrapper(pid, SYS_sendto, state.sock_fd, state.mmap_addr_after_pollfd, 6+state.address_len, 0, 0, 0);
+            put_data(pid, state.mmap_addr_after_pollfd, request, sizeof(request));
+            state.reg_state = syscall_wrapper(pid, SYS_sendto, state.sock_fd, (size_t)state.mmap_addr_after_pollfd, 6+state.address_len, 0, 0, 0);
             state.to_receive = 6;
             state.next = RECV_HANDSHAKE_POLL_FIRST;
             break;
@@ -403,13 +396,10 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             }
 
         case RECV_HANDSHAKE_POLL: {
-            char fds[POLLFD_SIZE];
-            struct pollfd* pollfd = (struct pollfd*)fds;
-            pollfd->fd = state.sock_fd;
-            pollfd->events = POLLIN;
-            put_data(pid, state.mmap_addr, fds, POLLFD_SIZE/WORD_SIZE);
+            struct pollfd pollfd = {state.sock_fd, POLLIN};
+            put_data(pid, state.mmap_addr, &pollfd, sizeof(pollfd));
 
-            state.reg_state = syscall_wrapper(pid, SYS_poll, state.mmap_addr, 1, -1, 0, 0, 0);
+            state.reg_state = syscall_wrapper(pid, SYS_poll, (size_t)state.mmap_addr, 1, -1, 0, 0, 0);
             state.next = RECV_HANDSHAKE;
             break;
         }
@@ -423,7 +413,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
-            state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.mmap_addr_after_pollfd+6-state.to_receive, state.to_receive, 0, 0, 0);
+            state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, (size_t)state.mmap_addr_after_pollfd+6-state.to_receive, state.to_receive, 0, 0, 0);
             state.next = POST_RECV_HANDSHAKE;
             break;
         }
@@ -442,8 +432,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 set_syscall_return_code(pid, -ECONNRESET);
                 state.next = DONE;
             } else if (state.to_receive == 0) {
-                char buffer[WORD_SIZE];
-                get_data(pid, state.mmap_addr_after_pollfd, buffer, sizeof(buffer)/WORD_SIZE);
+                char buffer[6];
+                get_data(pid, state.mmap_addr_after_pollfd, buffer, sizeof(buffer));
                 if (buffer[0] != 0x05 || buffer[1] != 0x00 || buffer[2] != 0x05 || buffer[3] != 0x00 || buffer[4] != 0x00) {
                     set_syscall_return_code(pid, -ECONNRESET);
                     state.next = DONE;
@@ -484,13 +474,10 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             }
 
         case RECV_ADDRESS_POLL_FIRST: {
-            char fds[POLLFD_SIZE];
-            struct pollfd* pollfd = (struct pollfd*)fds;
-            pollfd->fd = state.sock_fd;
-            pollfd->events = POLLIN;
-            put_data(pid, state.mmap_addr, fds, POLLFD_SIZE/WORD_SIZE);
+            struct pollfd pollfd = {state.sock_fd, POLLIN};
+            put_data(pid, state.mmap_addr, &pollfd, sizeof(pollfd));
 
-            state.reg_state = syscall_wrapper(pid, SYS_poll, state.mmap_addr, 1, -1, 0, 0, 0);
+            state.reg_state = syscall_wrapper(pid, SYS_poll, (size_t)state.mmap_addr, 1, -1, 0, 0, 0);
             state.next = RECV_ADDRESS;
             break;
         }
@@ -505,7 +492,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             }
 
             // drop the data
-            state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.mmap_addr_after_pollfd, state.to_receive, 0, 0, 0);
+            state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, (size_t)state.mmap_addr_after_pollfd, state.to_receive, 0, 0, 0);
             state.next = POST_RECV_ADDRESS;
             break;
         }
