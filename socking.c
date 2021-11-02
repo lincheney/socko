@@ -65,6 +65,8 @@ typedef struct {
     int is_ipv6;
     int address_len;
     char address[512];
+    char original_address[256];
+    size_t original_addr_len;
     register_state reg_state;
     void* mmap_addr;
     void* mmap_addr_after_pollfd;
@@ -211,10 +213,11 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
             state.sock_fd = regs.rdi;
             void* addr_ptr = (void*)regs.rsi;
-            size_t addr_len = regs.rdx;
+            state.original_addr_len = regs.rdx;
 
-            struct sockaddr* address_buffer = alloca(addr_len);
-            get_data(pid, (void*)regs.rsi, address_buffer, addr_len);
+            get_data(pid, (void*)regs.rsi, state.original_address, state.original_addr_len);
+            struct sockaddr* address_buffer = alloca(state.original_addr_len);
+            memcpy(address_buffer, state.original_address, state.original_addr_len);
 
             state.next = POST_CONNECT;
             switch (address_buffer->sa_family) {
@@ -227,7 +230,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
                     address->sin_addr.s_addr = proxy_host;
                     address->sin_port = htons(proxy_port);
-                    put_data(pid, addr_ptr, address_buffer, addr_len);
+                    put_data(pid, addr_ptr, address_buffer, state.original_addr_len);
                     break;
                 }
 
@@ -252,7 +255,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
                     // force the connect to fail
                     address->sin6_port = 0;
-                    put_data(pid, addr_ptr, address_buffer, addr_len);
+                    put_data(pid, addr_ptr, address_buffer, state.original_addr_len);
                     break;
                 }
                 default:
@@ -264,6 +267,10 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_CONNECT: {
             /* printf("connect() == %i\n", regs.rax); */
+
+            // restore the original address, since connect() is meant to be const
+            put_data(pid, (void*)state.reg_state.old_regs.rsi, state.original_address, state.original_addr_len);
+
             if (state.is_ipv6) {
                 state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
                 state.next = MAKE_IPV4_SOCKET;
