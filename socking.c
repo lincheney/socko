@@ -355,7 +355,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
             state.mmap_addr_after_pollfd = state.mmap_addr + POLLFD_SIZE;
             state.next = SEND_HANDSHAKE_POLL;
-            break;
+            return execute_state_machine(state, pid, regs);
         }
 
         case SEND_HANDSHAKE_POLL: {
@@ -530,9 +530,9 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
 finish_state:
     if (state.next == DONE) {
-        ptrace(PTRACE_CONT, pid, NULL, NULL);
+        ptrace(PTRACE_CONT, pid, NULL, 0);
     } else {
-        ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
+        ptrace(PTRACE_SYSCALL, pid, NULL, 0);
     }
     return state;
 }
