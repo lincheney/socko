@@ -24,66 +24,121 @@
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define POLLFD_SIZE ALIGNED_SIZE(sizeof(struct pollfd))
 
+unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
+
+// socks proxy address
 uint32_t proxy_host;
 uint16_t proxy_port;
 
+typedef struct user_regs_struct registers;
+
+// register state, so we can restore it
+typedef struct {
+    registers old_regs;
+    size_t rip;
+} register_state;
+
+// ptrace state machine
+typedef struct {
+    enum {
+        START,
+        POST_CONNECT,
+        MAKE_IPV4_SOCKET,
+        MAKE_MMAP,
+        CONNECT_IPV4_SOCKET,
+        POST_CONNECT_IPV4,
+        POST_MMAP,
+        SEND_HANDSHAKE_POLL,
+        SEND_HANDSHAKE,
+        RECV_HANDSHAKE_POLL_FIRST,
+        RECV_HANDSHAKE_POLL,
+        RECV_HANDSHAKE,
+        POST_RECV_HANDSHAKE,
+        RECV_ADDRESS_POLL_FIRST,
+        RECV_ADDRESS_POLL,
+        RECV_ADDRESS,
+        POST_RECV_ADDRESS,
+        DONE,
+    } next;
+
+    int sock_fd;
+    int is_ipv6;
+    int address_len;
+    char address[512];
+    register_state reg_state;
+    size_t mmap_addr;
+    size_t mmap_addr_after_pollfd;
+    int to_receive;
+} state;
+
+// lookup table for processes
+typedef struct {
+    pid_t pid;
+    state state;
+} process_state;
+
+#define process_cmp_fn(key, value) ((key) == (value.pid))
+ARRAY_TYPE(ProcessArray, process_state, pid_t, process_cmp_fn);
+ProcessArray processes = {0, 0, NULL};
+
+
 int (*real_getaddrinfo)(const char*, const char*, const void*, void*);
-int hijack = 0;
+int hijack_dns = 0;
+
+// lookup table for addresses
 #define cmp_fn(key, value) (strcmp((key), (value)) == 0)
 ARRAY_TYPE(AddressArray, char*, char*, cmp_fn);
 AddressArray addresses = {0, 0, NULL};
 
-extern int getaddrinfo (const char *restrict name,
-			const char *restrict service,
-			const struct addrinfo *restrict req,
-			struct addrinfo **restrict result) {
-    if (real_getaddrinfo) {
-        /* printf("getaddrinfo(%s, %s)\n", name, service); */
 
-        if (hijack && name) {
-            uint16_t port = 0;
-            if (service) {
-                struct servent* serv = getservbyname(service, NULL);
-                if (serv) {
-                    port = serv->s_port;
-                } else {
-                    port = htons(atoi(service ? service : "0"));
-                }
+extern int getaddrinfo(const char *restrict name,
+                        const char *restrict service,
+                        const struct addrinfo *restrict req,
+                        struct addrinfo **restrict result) {
+
+    if (hijack_dns && name) {
+        uint16_t port = 0;
+        if (service) {
+            struct servent* serv = getservbyname(service, NULL);
+            if (serv) {
+                port = serv->s_port;
+            } else {
+                port = htons(atoi(service ? service : "0"));
             }
-
-            uint16_t name_len = strlen(name) + 1;
-            int index = AddressArray_find(&addresses, name);
-            if (index < 0) {
-                index = AddressArray_append(&addresses, strdup(name));
-            }
-
-            addrinfo_data address_data = {addresses.data[index], name_len, port};
-
-            struct addrinfo* address = malloc(sizeof(struct addrinfo));
-            address->ai_flags = 0;
-            address->ai_family = AF_INET6;
-            address->ai_socktype = SOCK_STREAM;
-            address->ai_protocol = IPPROTO_TCP;
-            address->ai_addrlen = sizeof(struct sockaddr_in6);
-            struct sockaddr_in6* addr6 = malloc(address->ai_addrlen);
-            addr6->sin6_family = AF_INET6;
-            addr6->sin6_port = port;
-            addr6->sin6_flowinfo = 0;
-            memcpy(addr6->sin6_addr.s6_addr, &address_data, sizeof(address_data));
-            addr6->sin6_scope_id = SCOPE_ID;
-            address->ai_addr = (struct sockaddr*)addr6;
-            address->ai_canonname = NULL;
-            address->ai_next = NULL;
-            *result = address;
-
-            return 0;
         }
 
+        uint16_t name_len = strlen(name) + 1;
+        int index = AddressArray_find(&addresses, name);
+        if (index < 0) {
+            index = AddressArray_append(&addresses, strdup(name));
+        }
 
-        return real_getaddrinfo(name, service, req, result);
-    } else {
-        return EAI_FAIL;
+        addrinfo_data address_data = {addresses.data[index], name_len, port};
+
+        struct addrinfo* address = malloc(sizeof(struct addrinfo));
+        address->ai_flags = 0;
+        address->ai_family = AF_INET6;
+        address->ai_socktype = SOCK_STREAM;
+        address->ai_protocol = IPPROTO_TCP;
+        address->ai_addrlen = sizeof(struct sockaddr_in6);
+        struct sockaddr_in6* addr6 = malloc(address->ai_addrlen);
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = port;
+        addr6->sin6_flowinfo = 0;
+        memcpy(addr6->sin6_addr.s6_addr, &address_data, sizeof(address_data));
+        addr6->sin6_scope_id = SCOPE_ID;
+        address->ai_addr = (struct sockaddr*)addr6;
+        address->ai_canonname = NULL;
+        address->ai_next = NULL;
+        *result = address;
+
+        return 0;
     }
+
+    if (real_getaddrinfo) {
+        return real_getaddrinfo(name, service, req, result);
+    }
+    return EAI_FAIL;
 }
 
 void get_data(pid_t child, size_t addr, char* buffer, int count) {
@@ -100,13 +155,6 @@ size_t put_data(pid_t child, size_t addr, char* buffer, int count) {
     }
     return addr + count*WORD_SIZE;
 }
-
-typedef struct user_regs_struct registers;
-
-typedef struct {
-    registers old_regs;
-    size_t rip;
-} register_state;
 
 register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
     registers regs, old_regs;
@@ -153,38 +201,6 @@ void set_syscall_return_code(pid_t pid, int rc) {
     regs.rax = rc;
     ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 }
-
-typedef struct {
-    enum {
-        START,
-        POST_CONNECT,
-        MAKE_IPV4_SOCKET,
-        MAKE_MMAP,
-        CONNECT_IPV4_SOCKET,
-        POST_CONNECT_IPV4,
-        POST_MMAP,
-        SEND_HANDSHAKE_POLL,
-        SEND_HANDSHAKE,
-        RECV_HANDSHAKE_POLL_FIRST,
-        RECV_HANDSHAKE_POLL,
-        RECV_HANDSHAKE,
-        POST_RECV_HANDSHAKE,
-        RECV_ADDRESS_POLL_FIRST,
-        RECV_ADDRESS_POLL,
-        RECV_ADDRESS,
-        POST_RECV_ADDRESS,
-        DONE,
-    } next;
-
-    int sock_fd;
-    int is_ipv6;
-    int address_len;
-    char address[512];
-    register_state reg_state;
-    size_t mmap_addr;
-    size_t mmap_addr_after_pollfd;
-    int to_receive;
-} state;
 
 state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs) {
     int rc;
@@ -527,22 +543,11 @@ finish_state:
     return state;
 }
 
-typedef struct {
-    pid_t pid;
-    state state;
-} process_state;
-
-#define process_cmp_fn(key, value) ((key) == (value.pid))
-ARRAY_TYPE(ProcessArray, process_state, pid_t, process_cmp_fn);
-ProcessArray processes = {0, 0, NULL};
-
 void handle_process(int index, pid_t pid, registers regs) {
     state oldstate = processes.data[index].state;
     state newstate = execute_state_machine(oldstate, pid, regs);
     processes.data[index].state = newstate;
 }
-
-unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
 
 __attribute__((constructor))
 static void init(int argc, const char **argv) {
@@ -550,28 +555,32 @@ static void init(int argc, const char **argv) {
 
     const char* socking_enabled = getenv("SOCKING_ENABLED");
     if (socking_enabled && strcmp(socking_enabled, "1") == 0) {
-        hijack = 1;
+        // we are already being ptraced ...
+        hijack_dns = 1;
         return;
     }
 
-    // get filename of this shared lib
-    Dl_info info;
-    if (dladdr(init, &info) == 0) {
-        dprintf(2, "Could not determine path to shared library\n");
-        return;
-    }
+    // ... otherwise we need to fork and ptrace
 
     const char* socking_proxy = getenv("SOCKING_PROXY");
     if (!socking_proxy) {
-        dprintf(2, "$SOCKING_PROXY has not been set\n");
+        /* dprintf(2, "Error: $SOCKING_PROXY has not been set\n"); */
         return;
     }
     char* proxy = strdup(socking_proxy);
     char* host = strtok(proxy, ":");
-    proxy = strtok(NULL, "");
-    if (!host || !proxy || sscanf(proxy, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
+    char* port = strtok(NULL, "");
+    if (!host || !port || sscanf(port, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
         dprintf(2, "Error: invalid $SOCKING_PROXY: %s\n", socking_proxy);
-        return 2;
+        return;
+    }
+    free(proxy);
+
+    // get filename of this shared lib
+    Dl_info info;
+    if (dladdr(init, &info) == 0) {
+        dprintf(2, "Error: Could not determine path to shared library\n");
+        return;
     }
 
     pid_t tracer_pid = getpid();
@@ -579,7 +588,7 @@ static void init(int argc, const char **argv) {
     pid_t child = fork();
     if (child < 0) {
         perror("Failed to fork");
-        return 1;
+        exit(1);
     }
 
     if (child == 0) {
@@ -593,10 +602,10 @@ static void init(int argc, const char **argv) {
 
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         raise(SIGSTOP);
-        execvp(argv[0], (char *const*)argv);
+        execvp(argv[0], (char* const*)argv);
         // unreachable
         perror(argv[0]);
-        return 1;
+        exit(1);
     }
 
     int rc = 0;
@@ -608,12 +617,15 @@ static void init(int argc, const char **argv) {
         if (pid < 0 && errno == ECHILD) {
             break;
         } else if (pid < 0) {
-            perror("waitpid() failed");
-            return 1;
+            perror("Error: waitpid() failed");
+            exit(1);
         }
 
         if (WIFEXITED(status)) {
-            rc = WEXITSTATUS(status);
+            if (pid == child) {
+                rc = WEXITSTATUS(status);
+            }
+
             // process exited
             int index = ProcessArray_find(&processes, pid);
             if (index >= 0) {
@@ -626,8 +638,8 @@ static void init(int argc, const char **argv) {
         int index = ProcessArray_find(&processes, pid);
         if (index < 0) {
             if (!WIFSTOPPED(status) || signal != SIGSTOP) {
-                perror("not stopped");
-                return 1;
+                perror("Error: tracee not stopped");
+                exit(1);
             }
 
             // first time seeing process
@@ -678,5 +690,5 @@ static void init(int argc, const char **argv) {
                 break;
         }
     }
-    return rc;
+    exit(rc);
 }
