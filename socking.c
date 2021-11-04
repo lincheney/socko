@@ -224,6 +224,9 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
     switch (state.next) {
         case START: {
+            state.is_ipv6 = 0;
+            state.is_tcp = 0;
+
             state.sock_fd = regs.rdi;
             state.original_addr_ptr = regs.rsi;
             state.original_addr_len = regs.rdx;
@@ -237,9 +240,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         }
 
         case CONNECT: {
-            state.is_ipv6 = 0;
-            state.is_tcp = 0;
-
             rc = post_syscall(pid, state.reg_state);
             DEBUG("%i: getsockopt() == %i\n", pid, rc);
             if (rc < 0) {
@@ -335,7 +335,12 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             }
 
             if (state.is_ipv6) {
-                state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
+                int type = SOCK_STREAM;
+                if (rc == -EINPROGRESS) {
+                    // probably a nonblocking socket
+                    type |= SOCK_NONBLOCK;
+                }
+                state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, type, IPPROTO_TCP, 0, 0, 0);
                 state.next = MAKE_IPV4_SOCKET;
             } else if (regs.rax < 0) {
                 set_syscall_return_code(pid, regs.rax);
@@ -383,7 +388,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
         case POST_CONNECT_IPV4: {
             rc = post_syscall(pid, state.reg_state);
             DEBUG("%i: connect() == %i\n", pid, rc);
-            if (rc < 0) {
+            if (rc < 0 && rc != -EINPROGRESS) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
                 break;
