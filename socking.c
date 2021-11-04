@@ -62,7 +62,6 @@ typedef struct {
         RECV_HANDSHAKE_POLL,
         RECV_HANDSHAKE,
         POST_RECV_HANDSHAKE,
-        RECV_ADDRESS_POLL_FIRST,
         RECV_ADDRESS_POLL,
         RECV_ADDRESS,
         POST_RECV_ADDRESS,
@@ -590,6 +589,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             break;
         }
 
+        case DONE:
+            break;
     }
 
     if (state.next == DONE) {
@@ -633,7 +634,7 @@ static void init(int argc, const char **argv) {
     char* proxy = strdup(socking_proxy);
     char* host = strtok(proxy, ":");
     char* port = strtok(NULL, "");
-    if (!host || !port || sscanf(port, "%u", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
+    if (!host || !port || sscanf(port, "%hu", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
         dprintf(2, "Error: invalid $SOCKING_PROXY: %s\n", socking_proxy);
         return;
     }
@@ -645,8 +646,6 @@ static void init(int argc, const char **argv) {
         dprintf(2, "Error: Could not determine path to shared library\n");
         return;
     }
-
-    pid_t tracer_pid = getpid();
 
     pid_t child = fork();
     if (child < 0) {
@@ -686,7 +685,6 @@ static void init(int argc, const char **argv) {
     }
 
     int rc = 0;
-    int first = 1;
     while (1) {
         int status;
         pid_t pid = waitpid(-1, &status, 0);
