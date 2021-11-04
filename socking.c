@@ -45,6 +45,7 @@ typedef struct {
 typedef struct {
     enum {
         START,
+        CONNECT,
         POST_CONNECT,
         MAKE_IPV4_SOCKET,
         CONNECT_IPV4_SOCKET,
@@ -64,6 +65,7 @@ typedef struct {
 
     int sock_fd;
     int is_ipv6;
+    int is_tcp;
 
     char buffer[512];
     int buffer_start;
@@ -170,6 +172,7 @@ register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t ar
     old_regs = regs;
 
     // populate new registers
+    regs.orig_rax = syscall;
     regs.rax = syscall;
     regs.rdi = arg0;
     regs.rsi = arg1;
@@ -213,13 +216,44 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
     switch (state.next) {
         case START: {
-            state.is_ipv6 = 0;
-
             state.sock_fd = regs.rdi;
             state.original_addr_ptr = regs.rsi;
             state.original_addr_len = regs.rdx;
+            get_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
 
-            get_data(pid, (void*)regs.rsi, state.original_address, state.original_addr_len);
+            int len = sizeof(uint32_t);
+            put_data(pid, (void*)state.original_addr_ptr+len, &len, sizeof(len));
+            state.reg_state = syscall_wrapper(pid, SYS_getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, state.original_addr_ptr, state.original_addr_ptr+len, 0);
+            state.next = CONNECT;
+            break;
+        }
+
+        case CONNECT: {
+            state.is_ipv6 = 0;
+            state.is_tcp = 0;
+
+            rc = post_syscall(pid, state.reg_state);
+            DEBUG("%i: getsockopt() == %i\n", pid, rc);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
+            // restore the original address
+            put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
+            // resume the connect call
+            regs = state.reg_state.old_regs;
+            state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
+
+            uint32_t type = 0;
+            get_data(pid, (void*)state.original_addr_ptr, &type, sizeof(uint32_t));
+            if (type != SOCK_STREAM) {
+                state.next = POST_CONNECT;
+                break;
+            }
+            state.is_tcp = 1;
+
             struct sockaddr* address_buffer = alloca(state.original_addr_len);
             memcpy(address_buffer, state.original_address, state.original_addr_len);
 
@@ -274,15 +308,22 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     put_data(pid, (void*)state.original_addr_ptr, address_buffer, state.original_addr_len);
                     break;
                 }
+
                 default:
-                    state.next = DONE;
+                    state.next = POST_CONNECT;
                     break;
             }
             break;
         }
 
         case POST_CONNECT: {
-            DEBUG("connect() == %i\n", regs.rax);
+            rc = post_syscall(pid, state.reg_state);
+            DEBUG("%i: connect() == %i\n", pid, rc);
+            if ((rc < 0 && rc != -EINPROGRESS) || !state.is_tcp) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
 
             if (state.is_ipv6) {
                 state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
@@ -299,7 +340,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case MAKE_IPV4_SOCKET: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("socket() == %i\n", rc);
+            DEBUG("%i: socket() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -313,7 +354,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case CONNECT_IPV4_SOCKET: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("dup2() == %i\n", rc);
+            DEBUG("%i: dup2() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -332,7 +373,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_CONNECT_IPV4: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("connect() == %i\n", rc);
+            DEBUG("%i: connect() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -354,7 +395,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case SEND_HANDSHAKE: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("poll() == %i\n", rc);
+            DEBUG("%i: poll() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -371,7 +412,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_SEND_HANDSHAKE: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("sendto/poll() == %i\n", rc);
+            DEBUG("%i: sendto() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -400,7 +441,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case RECV_HANDSHAKE: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("poll() == %i\n", rc);
+            DEBUG("%i: poll() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -415,7 +456,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_RECV_HANDSHAKE: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("handshake: recvfrom() == %i\n", rc);
+            DEBUG("%i: handshake: recvfrom() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -474,7 +515,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case RECV_ADDRESS: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("poll() == %i\n", rc);
+            DEBUG("%i: poll() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
@@ -490,7 +531,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case POST_RECV_ADDRESS: {
             rc = post_syscall(pid, state.reg_state);
-            DEBUG("address: recvfrom() == %i\n", rc);
+            DEBUG("%i: address: recvfrom() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
