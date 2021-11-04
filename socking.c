@@ -16,6 +16,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/uio.h>
 
 #include "array.c"
 #include "shared.h"
@@ -155,7 +156,6 @@ extern int getaddrinfo(const char *restrict name,
     return EAI_FAIL;
 }
 
-#include <sys/uio.h>
 void get_data(pid_t pid, void* addr, void* buffer, int count) {
     struct iovec local_iov = {buffer, count};
     struct iovec remote_iov = {(void*)addr, count};
