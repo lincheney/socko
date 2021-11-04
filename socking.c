@@ -66,7 +66,6 @@ typedef struct {
     } next;
 
     int sock_fd;
-    int is_ipv6;
     int is_tcp;
 
     char buffer[512];
@@ -224,7 +223,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
     switch (state.next) {
         case START: {
-            state.is_ipv6 = 0;
             state.is_tcp = 0;
 
             state.sock_fd = regs.rdi;
@@ -248,79 +246,78 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
+            int is_ipv6 = 0;
             // get the sock type
             uint32_t type = 0;
             get_data(pid, (void*)state.original_addr_ptr, &type, sizeof(uint32_t));
             // then restore the original address
             put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
-            // then resume the connect call
-            regs = state.reg_state.old_regs;
-            state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
-
-            if (type != SOCK_STREAM) {
-                state.next = POST_CONNECT;
-                break;
-            }
-            state.is_tcp = 1;
-
-            struct sockaddr* address_buffer = alloca(state.original_addr_len);
-            memcpy(address_buffer, state.original_address, state.original_addr_len);
-
-            state.buffer_start = 0;
-            memcpy(state.buffer,
-                "\x05" // version
-                "\x01" // no. auth
-                "\x00" // noauth
-                "\x05" // version
-                "\x01" // command
-                "\x00" // reserved
-                , 6);
-            state.buffer_len = 6;
 
             state.next = POST_CONNECT;
-            switch (address_buffer->sa_family) {
-                case AF_INET: {
-                    struct sockaddr_in* address = (void*)address_buffer;
-                    state.buffer_len += 1 + sizeof(uint32_t) + sizeof(uint16_t);
-                    state.buffer[6] = 0x01;
-                    memcpy(state.buffer+6+1, &address->sin_addr.s_addr, sizeof(uint32_t));
-                    memcpy(state.buffer+6+1+sizeof(uint32_t), &address->sin_port, sizeof(uint16_t));
+            if (type == SOCK_STREAM) {
+                state.is_tcp = 1;
 
-                    address->sin_addr.s_addr = proxy_host;
-                    address->sin_port = htons(proxy_port);
-                    put_data(pid, (void*)state.original_addr_ptr, address_buffer, state.original_addr_len);
-                    break;
-                }
+                struct sockaddr* address_buffer = alloca(state.original_addr_len);
+                memcpy(address_buffer, state.original_address, state.original_addr_len);
 
-                case AF_INET6: {
-                    state.is_ipv6 = 1;
-                    struct sockaddr_in6* address = (void*)address_buffer;
+                state.buffer_start = 0;
+                memcpy(state.buffer,
+                    "\x05" // version
+                    "\x01" // no. auth
+                    "\x00" // noauth
+                    "\x05" // version
+                    "\x01" // command
+                    "\x00" // reserved
+                    , 6);
+                state.buffer_len = 6;
 
-                    if (address->sin6_scope_id == SCOPE_ID) {
-                        // hijack
-                        addrinfo_data *data = (void*)address->sin6_addr.s6_addr;
-                        state.buffer_len += 2 + (data->len-1) + sizeof(uint16_t);
-                        state.buffer[6] = 0x03;
-                        state.buffer[7] = data->len-1;
-                        get_data(pid, data->name_ptr, state.buffer+6+2, data->len-1);
-                        memcpy(state.buffer+6+2+(data->len-1), &address->sin6_port, sizeof(uint16_t));
+                state.next = POST_CONNECT;
+                switch (address_buffer->sa_family) {
+                    case AF_INET: {
+                        struct sockaddr_in* address = (void*)address_buffer;
+                        state.buffer_len += 1 + sizeof(uint32_t) + sizeof(uint16_t);
+                        state.buffer[6] = 0x01;
+                        memcpy(state.buffer+6+1, &address->sin_addr.s_addr, sizeof(uint32_t));
+                        memcpy(state.buffer+6+1+sizeof(uint32_t), &address->sin_port, sizeof(uint16_t));
 
-                    } else {
-                        state.buffer_len += 1 + 16 + sizeof(uint16_t);
-                        state.buffer[6] = 0x04;
-                        memcpy(state.buffer+6+1, &address->sin6_addr.s6_addr, 16);
-                        memcpy(state.buffer+6+1+16, &address->sin6_port, sizeof(uint16_t));
+                        address->sin_addr.s_addr = proxy_host;
+                        address->sin_port = htons(proxy_port);
+                        put_data(pid, (void*)state.original_addr_ptr, address_buffer, state.original_addr_len);
+                        break;
                     }
 
-                    // force the connect to fail
-                    address->sin6_port = 0;
-                    put_data(pid, (void*)state.original_addr_ptr, address_buffer, state.original_addr_len);
-                    break;
-                }
+                    case AF_INET6: {
+                        is_ipv6 = 1;
+                        struct sockaddr_in6* address = (void*)address_buffer;
 
-                default:
-                    state.next = POST_CONNECT;
-                    break;
+                        if (address->sin6_scope_id == SCOPE_ID) {
+                            // hijack
+                            addrinfo_data *data = (void*)address->sin6_addr.s6_addr;
+                            state.buffer_len += 2 + (data->len-1) + sizeof(uint16_t);
+                            state.buffer[6] = 0x03;
+                            state.buffer[7] = data->len-1;
+                            get_data(pid, data->name_ptr, state.buffer+6+2, data->len-1);
+                            memcpy(state.buffer+6+2+(data->len-1), &address->sin6_port, sizeof(uint16_t));
+
+                        } else {
+                            state.buffer_len += 1 + 16 + sizeof(uint16_t);
+                            state.buffer[6] = 0x04;
+                            memcpy(state.buffer+6+1, &address->sin6_addr.s6_addr, 16);
+                            memcpy(state.buffer+6+1+16, &address->sin6_port, sizeof(uint16_t));
+                        }
+
+                        // need to remake as an ipv4 socket
+                        state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
+                        state.next = MAKE_IPV4_SOCKET;
+                        break;
+                    }
+                }
+            }
+
+            if (!is_ipv6) {
+                // resume the connect call
+                regs = state.reg_state.old_regs;
+                state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
             }
             break;
         }
@@ -334,15 +331,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
-            if (state.is_ipv6) {
-                int type = SOCK_STREAM;
-                if (rc == -EINPROGRESS) {
-                    // probably a nonblocking socket
-                    type |= SOCK_NONBLOCK;
-                }
-                state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, type, IPPROTO_TCP, 0, 0, 0);
-                state.next = MAKE_IPV4_SOCKET;
-            } else if (regs.rax < 0) {
+            if (regs.rax < 0) {
                 set_syscall_return_code(pid, regs.rax);
                 state.next = DONE;
             } else {
