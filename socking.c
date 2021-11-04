@@ -46,6 +46,14 @@ typedef struct {
     instruction_t rip;
 } register_state;
 
+typedef struct {
+    void* name_ptr;
+    uint16_t len;
+    uint16_t port;
+} addrinfo_data;
+
+#define SCOPE_ID ((uint32_t)0xffffff)
+
 // ptrace state machine
 typedef struct {
     enum {
