@@ -24,6 +24,8 @@
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define POLLFD_SIZE ALIGNED_SIZE(sizeof(struct pollfd))
+#define SYSCALL 0x050f
+typedef uint16_t instruction_t;
 
 #define DEBUG(...) dprintf(2, __VA_ARGS__)
 
@@ -38,7 +40,7 @@ typedef struct user_regs_struct registers;
 // register state, so we can restore it
 typedef struct {
     registers old_regs;
-    size_t rip;
+    instruction_t rip;
 } register_state;
 
 // ptrace state machine
@@ -165,11 +167,12 @@ void* put_data(pid_t pid, void* addr, void* buffer, int count) {
 }
 
 register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
-    registers regs, old_regs;
+    register_state state;
+    registers regs;
 
     // get initial registers
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-    old_regs = regs;
+    state.old_regs = regs;
 
     // populate new registers
     regs.orig_rax = syscall;
@@ -180,23 +183,28 @@ register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t ar
     regs.r10 = arg3;
     regs.r8 = arg4;
     regs.r9 = arg5;
+    regs.rip -= sizeof(instruction_t);
 
     // get initial RIP
-    size_t rip = ptrace(PTRACE_PEEKTEXT, pid, regs.rip, NULL);
+    get_data(pid, (void*)regs.rip, &state.rip, sizeof(instruction_t));
+    if (state.rip != SYSCALL) {
+        // set RIP
+        instruction_t newrip = 0x050f;
+        put_data(pid, (void*)regs.rip, &newrip, sizeof(instruction_t));
+    }
 
     // set the registers
     ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-    // set RIP
-    ptrace(PTRACE_POKEDATA, pid, regs.rip, 0x050f); //syscall
 
-    register_state state = {old_regs, rip};
     return state;
 }
 
 size_t post_syscall(pid_t pid, register_state state) {
     registers regs;
     // restore RIP
-    ptrace(PTRACE_POKETEXT, pid, state.old_regs.rip, state.rip); //syscall
+    if (state.rip != SYSCALL) {
+        put_data(pid, (void*)state.old_regs.rip, &state.rip, sizeof(instruction_t));
+    }
     // return
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
     // restore registers
@@ -240,14 +248,15 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
-            // restore the original address
+            // get the sock type
+            uint32_t type = 0;
+            get_data(pid, (void*)state.original_addr_ptr, &type, sizeof(uint32_t));
+            // then restore the original address
             put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
-            // resume the connect call
+            // then resume the connect call
             regs = state.reg_state.old_regs;
             state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
 
-            uint32_t type = 0;
-            get_data(pid, (void*)state.original_addr_ptr, &type, sizeof(uint32_t));
             if (type != SOCK_STREAM) {
                 state.next = POST_CONNECT;
                 break;
@@ -427,7 +436,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             state.next = RECV_HANDSHAKE_POLL;
             state.buffer_start = 0;
             state.buffer_len = 6;
-            break;
+            return execute_state_machine(state, pid, regs);
         }
 
         case RECV_HANDSHAKE_POLL: {
@@ -549,7 +558,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             state.buffer_start += rc;
 
             if (state.buffer_len == 0) {
-                ptrace(PTRACE_CONT, pid, NULL, NULL);
+                set_syscall_return_code(pid, 0);
                 state.next = DONE;
             } else {
                 state.next = RECV_ADDRESS_POLL;
