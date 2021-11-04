@@ -18,8 +18,7 @@
 #include <fcntl.h>
 #include <sys/uio.h>
 
-#include "array.c"
-#include "shared.h"
+#include "array.h"
 
 #define WORD_SIZE sizeof(size_t)
 #define ALIGNED_SIZE(x) ((x) + (x) % -WORD_SIZE)
