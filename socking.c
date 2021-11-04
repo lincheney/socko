@@ -15,6 +15,7 @@
 #include <netdb.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "array.c"
 #include "shared.h"
@@ -50,6 +51,8 @@ typedef struct {
         CONNECT,
         POST_CONNECT,
         MAKE_IPV4_SOCKET,
+        FCNTL_IPV4_SOCKET,
+        DUP_IPV4_SOCKET,
         CONNECT_IPV4_SOCKET,
         POST_CONNECT_IPV4,
         SEND_HANDSHAKE_POLL,
@@ -67,6 +70,7 @@ typedef struct {
 
     int sock_fd;
     int is_tcp;
+    int fcntl;
 
     char buffer[512];
     int buffer_start;
@@ -246,7 +250,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                 break;
             }
 
-            int is_ipv6 = 0;
             // get the sock type
             uint32_t type = 0;
             get_data(pid, (void*)state.original_addr_ptr, &type, sizeof(uint32_t));
@@ -287,7 +290,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     }
 
                     case AF_INET6: {
-                        is_ipv6 = 1;
                         struct sockaddr_in6* address = (void*)address_buffer;
 
                         if (address->sin6_scope_id == SCOPE_ID) {
@@ -307,18 +309,16 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                         }
 
                         // need to remake as an ipv4 socket
-                        state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
+                        state.reg_state = syscall_wrapper(pid, SYS_fcntl, state.sock_fd, F_GETFL, 0, 0, 0, 0);
                         state.next = MAKE_IPV4_SOCKET;
-                        break;
+                        return execute_state_machine(state, pid, regs);
                     }
                 }
             }
 
-            if (!is_ipv6) {
-                // resume the connect call
-                regs = state.reg_state.old_regs;
-                state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
-            }
+            // resume the connect call
+            regs = state.reg_state.old_regs;
+            state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
             break;
         }
 
@@ -343,7 +343,36 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
         case MAKE_IPV4_SOCKET: {
             rc = post_syscall(pid, state.reg_state);
+            DEBUG("%i: fcntl() == %i\n", pid, rc);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
+            state.fcntl = rc;
+            state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
+            state.next = DUP_IPV4_SOCKET;
+            break;
+        }
+
+        case FCNTL_IPV4_SOCKET: {
+            rc = post_syscall(pid, state.reg_state);
             DEBUG("%i: socket() == %i\n", pid, rc);
+            if (rc < 0) {
+                set_syscall_return_code(pid, rc);
+                state.next = DONE;
+                break;
+            }
+
+            state.reg_state = syscall_wrapper(pid, SYS_fcntl, state.sock_fd, F_SETFL, state.fcntl, 0, 0, 0);
+            state.next = DUP_IPV4_SOCKET;
+            break;
+        }
+
+        case DUP_IPV4_SOCKET: {
+            rc = post_syscall(pid, state.reg_state);
+            DEBUG("%i: fcntl() == %i\n", pid, rc);
             if (rc < 0) {
                 set_syscall_return_code(pid, rc);
                 state.next = DONE;
