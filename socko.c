@@ -43,13 +43,13 @@ typedef struct user_regs_struct registers;
 typedef struct {
     registers old_regs;
     instruction_t rip;
-} register_state;
+} register_state_t;
 
 typedef struct {
     void* name_ptr;
     uint16_t len;
     uint16_t port;
-} addrinfo_data;
+} addrinfo_data_t;
 
 #define SCOPE_ID ((uint32_t)0xffffff)
 
@@ -69,19 +69,19 @@ typedef struct {
     size_t original_addr_len;
     size_t original_addr_ptr;
 
-    register_state reg_state;
+    register_state_t reg_state;
     int to_receive;
     int in_syscall;
-} state;
+} state_t;
 
 // lookup table for processes
 typedef struct {
     pid_t pid;
-    state state;
-} process_state;
+    state_t state;
+} process_state_t;
 
 #define process_cmp_fn(key, value) ((key) == (value.pid))
-ARRAY_TYPE(ProcessArray, process_state, pid_t, process_cmp_fn);
+ARRAY_TYPE(ProcessArray, process_state_t, pid_t, process_cmp_fn);
 ProcessArray processes = {0, 0, NULL};
 
 
@@ -116,7 +116,7 @@ extern int getaddrinfo(const char *restrict name,
             index = AddressArray_append(&addresses, strdup(name));
         }
 
-        addrinfo_data address_data = {addresses.data[index], name_len, port};
+        addrinfo_data_t address_data = {addresses.data[index], name_len, port};
 
         struct addrinfo* address = malloc(sizeof(struct addrinfo));
         address->ai_flags = 0;
@@ -157,8 +157,8 @@ void* put_data(pid_t pid, void* addr, void* buffer, int count) {
     return addr + count;
 }
 
-register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
-    register_state state;
+register_state_t syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
+    register_state_t state;
     registers regs;
 
     // get initial registers
@@ -190,7 +190,7 @@ register_state syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t ar
     return state;
 }
 
-size_t post_syscall(pid_t pid, register_state state) {
+size_t post_syscall(pid_t pid, register_state_t state) {
     registers regs;
     // restore RIP
     if (state.rip != SYSCALL) {
@@ -219,7 +219,7 @@ void set_syscall_return_code(pid_t pid, int rc) {
  * only problem is all function local variables will be lost/reset on each YIELD
  * anything that needs to be kept needs to be persisted into the state
  */
-state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs) {
+state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct regs) {
 
 #define START -1
 #define DONE -2
@@ -299,7 +299,7 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
                         if (address->sin6_scope_id == SCOPE_ID) {
                             // hijack
-                            addrinfo_data *data = (void*)address->sin6_addr.s6_addr;
+                            addrinfo_data_t *data = (void*)address->sin6_addr.s6_addr;
                             state.buffer_len += 2 + (data->len-1) + sizeof(uint16_t);
                             state.buffer[6] = 0x03;
                             state.buffer[7] = data->len-1;
@@ -441,8 +441,8 @@ FINISH_STATE_MACHINE:
 }
 
 void handle_process(int index, pid_t pid, registers regs) {
-    state oldstate = processes.data[index].state;
-    state newstate = execute_state_machine(oldstate, pid, regs);
+    state_t oldstate = processes.data[index].state;
+    state_t newstate = execute_state_machine(oldstate, pid, regs);
     processes.data[index].state = newstate;
 }
 
@@ -559,7 +559,7 @@ static void init(int argc, const char **argv) {
             }
 
             // first time seeing process
-            process_state item = {pid, {DONE,}};
+            process_state_t item = {pid, {DONE,}};
             item.state.in_syscall = 0;
             process_index = ProcessArray_append(&processes, item);
             ptrace(PTRACE_SETOPTIONS, pid, 0, ptrace_options);
