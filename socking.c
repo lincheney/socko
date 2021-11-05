@@ -28,8 +28,8 @@
 #define SYSCALL 0x050f
 typedef uint16_t instruction_t;
 
-/* #define DEBUG(...) dprintf(2, __VA_ARGS__) */
 #define DEBUG(...)
+/* #define DEBUG(...) dprintf(2, __VA_ARGS__) */
 
 unsigned int ptrace_options = PTRACE_O_EXITKILL | PTRACE_O_TRACESECCOMP | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK;
 
