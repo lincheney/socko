@@ -372,8 +372,7 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
                 int len = min(state.original_addr_len, state.buffer_len);
                 YIELD_SYSCALL(recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
                 if (rc == 0) {
-                    rc = -ECONNRESET;
-                    goto FINISH_STATE_MACHINE;
+                    goto FAIL_STATE_MACHINE;
                 }
 
                 get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
@@ -382,22 +381,19 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
             }
 
             if (state.buffer[0] != 0x05 || state.buffer[1] != 0x00 || state.buffer[2] != 0x05 || state.buffer[3] != 0x00 || state.buffer[4] != 0x00) {
-                rc = -ECONNRESET;
-                goto FINISH_STATE_MACHINE;
+                goto FAIL_STATE_MACHINE;
             }
             switch (state.buffer[5]) {
                 case 0x01:
                     state.buffer_len = 4+2;
                     break;
                 case 0x03:
-                    rc = -ECONNRESET;
-                    goto FINISH_STATE_MACHINE;
+                    goto FAIL_STATE_MACHINE;
                 case 0x04:
                     state.buffer_len = 16+2;
                     break;
                 default:
-                    rc = -ECONNRESET;
-                    goto FINISH_STATE_MACHINE;
+                    goto FAIL_STATE_MACHINE;
             }
             state.buffer_start = 0;
 
@@ -411,8 +407,7 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
                 int len = min(state.original_addr_len, state.buffer_len);
                 YIELD_SYSCALL(recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
                 if (rc == 0) {
-                    rc = -ECONNRESET;
-                    goto FINISH_STATE_MACHINE;
+                    goto FAIL_STATE_MACHINE;
                 }
 
                 get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
@@ -431,6 +426,8 @@ NEXT_STATE:
     ptrace(PTRACE_SYSCALL, pid, NULL, 0);
     return state;
 
+FAIL_STATE_MACHINE:
+    rc = -ECONNRESET;
 FINISH_STATE_MACHINE:
     // restore the original address, since connect() is meant to be const
     put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
