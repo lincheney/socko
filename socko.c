@@ -390,8 +390,8 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
                     state.buffer_len = 4+2;
                     break;
                 case 0x03:
-                    state.buffer_len = 1;
-                    break;
+                    rc = -ECONNRESET;
+                    goto FINISH_STATE_MACHINE;
                 case 0x04:
                     state.buffer_len = 16+2;
                     break;
