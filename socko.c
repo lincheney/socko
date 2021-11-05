@@ -55,29 +55,27 @@ typedef struct {
 
 // ptrace state machine
 typedef struct {
-    int next;
+    pid_t pid;
+    int state;
+    int in_syscall;
 
     int sock_fd;
     int is_tcp;
     int fcntl;
 
+    // general purpose buffer, mostly for the sendto/recvfrom
     char buffer[512];
     int buffer_start;
     int buffer_len;
 
+    // original sockaddr
     char original_address[256];
     size_t original_addr_len;
+    // pointer to sockaddr in child
     void* original_addr_ptr;
 
+    // saved register state
     register_state_t reg_state;
-    int to_receive;
-    int in_syscall;
-} state_t;
-
-// lookup table for processes
-typedef struct {
-    pid_t pid;
-    state_t state;
 } process_state_t;
 
 #define process_cmp_fn(key, value) ((key) == (value.pid))
@@ -219,13 +217,13 @@ void set_syscall_return_code(pid_t pid, int rc) {
  * only problem is all function local variables will be lost/reset on each YIELD
  * anything that needs to be kept needs to be persisted into the state
  */
-state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct regs) {
+process_state_t execute_state_machine(process_state_t state, pid_t pid, struct user_regs_struct regs) {
 
 #define START -1
 #define DONE -2
 #define YIELD_IMPL(counter) \
-    state.next = counter; \
-    goto NEXT_STATE; \
+    state.state = counter; \
+    goto state_STATE; \
     case counter: \
 
 #define YIELD YIELD_IMPL(__COUNTER__)
@@ -241,7 +239,7 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
 
     int rc;
 
-    switch (state.next) {
+    switch (state.state) {
         case START:
             state.is_tcp = 0;
 
@@ -422,7 +420,7 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
             break;
     }
 
-NEXT_STATE:
+state_STATE:
     ptrace(PTRACE_SYSCALL, pid, NULL, 0);
     return state;
 
@@ -431,16 +429,16 @@ FAIL_STATE_MACHINE:
 FINISH_STATE_MACHINE:
     // restore the original address, since connect() is meant to be const
     put_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
-    state.next = DONE;
+    state.state = DONE;
     set_syscall_return_code(pid, rc);
     ptrace(PTRACE_CONT, pid, NULL, 0);
     return state;
 }
 
 void handle_process(int index, pid_t pid, registers regs) {
-    state_t oldstate = processes.data[index].state;
-    state_t newstate = execute_state_machine(oldstate, pid, regs);
-    processes.data[index].state = newstate;
+    process_state_t oldstate = processes.data[index];
+    process_state_t newstate = execute_state_machine(oldstate, pid, regs);
+    processes.data[index] = newstate;
 }
 
 #include <sys/prctl.h>
@@ -556,8 +554,10 @@ static void init(int argc, const char **argv) {
             }
 
             // first time seeing process
-            process_state_t item = {pid, {DONE,}};
-            item.state.in_syscall = 0;
+            process_state_t item;
+            item.pid = pid;
+            item.state = DONE;
+            item.in_syscall = 0;
             process_index = ProcessArray_append(&processes, item);
             ptrace(PTRACE_SETOPTIONS, pid, 0, ptrace_options);
             ptrace(PTRACE_CONT, pid, 0, 0);
@@ -565,7 +565,7 @@ static void init(int argc, const char **argv) {
         }
 
         int ptrace_request = PTRACE_CONT;
-        if (processes.data[process_index].state.next != DONE) {
+        if (processes.data[process_index].state != DONE) {
             ptrace_request = PTRACE_SYSCALL;
         }
 
@@ -586,16 +586,16 @@ static void init(int argc, const char **argv) {
          * except for that very first connect(), we want only the exit for all other syscalls (including the second connect())
         */
 
-        if (event && processes.data[process_index].state.next != DONE) {
+        if (event && processes.data[process_index].state != DONE) {
             // skip non-first connect() seccomp events
             ptrace(PTRACE_SYSCALL, pid, NULL, 0);
             continue;
         }
 
-        processes.data[process_index].state.in_syscall ^= 1;
+        processes.data[process_index].in_syscall ^= 1;
         if (event) {
-            processes.data[process_index].state.next = START;
-        } else if (processes.data[process_index].state.in_syscall) {
+            processes.data[process_index].state = START;
+        } else if (processes.data[process_index].in_syscall) {
             ptrace(PTRACE_SYSCALL, pid, NULL, 0);
             continue;
         }
