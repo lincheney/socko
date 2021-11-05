@@ -229,11 +229,36 @@ void set_syscall_return_code(pid_t pid, int rc) {
     ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 }
 
+/*
+ * this is monstrous
+ * we're using the fact that switch can jump anywhere, incl into ifs and whiles and stuff
+ * to build this state machine in some faux ergonomic syntax
+ *
+ * __COUNTER__ provides a nice convenient way to have "anonymous" states without specifying each one
+ * only problem is all function local variables will be lost/reset on each YIELD
+ * anything that needs to be kept needs to be persisted into the state
+ */
 state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs) {
+
+#define START -1
+#define DONE -2
+#define YIELD_IMPL(counter) \
+    state.next = counter; \
+    goto NEXT_STATE; \
+    case counter: \
+
+#define YIELD YIELD_IMPL(__COUNTER__)
+
+#define YIELD_SYSCALL(syscall, ...) \
+    state.reg_state = syscall_wrapper(pid, SYS_getsockopt, __VA_ARGS__); \
+    YIELD; \
+    rc = post_syscall(pid, state.reg_state) \
+    DEBUG("%i: " #syscall "() == %i\n", pid, rc); \
+
     int rc;
 
     switch (state.next) {
-        case START: {
+        case START:
             state.is_tcp = 0;
 
             state.sock_fd = regs.rdi;
@@ -243,18 +268,14 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
 
             int len = sizeof(uint32_t);
             put_data(pid, (void*)state.original_addr_ptr+len, &len, sizeof(len));
-            state.reg_state = syscall_wrapper(pid, SYS_getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, state.original_addr_ptr, state.original_addr_ptr+len, 0);
-            state.next = CONNECT;
-            break;
-        }
 
-        case CONNECT: {
+            /* YIELD_SYSCALL(getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, state.original_addr_ptr, state.original_addr_ptr+len); */
+            state.reg_state = syscall_wrapper(pid, SYS_getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, state.original_addr_ptr, state.original_addr_ptr+len, 0);
+            YIELD;
             rc = post_syscall(pid, state.reg_state);
             DEBUG("%i: getsockopt() == %i\n", pid, rc);
             if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
+                goto FINISH_STATE_MACHINE;
             }
 
             // get the sock type
@@ -263,7 +284,8 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
             // then restore the original address
             put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
 
-            state.next = POST_CONNECT;
+            int remake_as_ipv4_socket = 0;
+
             if (type == SOCK_STREAM) {
                 state.is_tcp = 1;
 
@@ -281,7 +303,6 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                     , 6);
                 state.buffer_len = 6;
 
-                state.next = POST_CONNECT;
                 switch (address_buffer->sa_family) {
                     case AF_INET: {
                         struct sockaddr_in* address = (void*)address_buffer;
@@ -315,299 +336,191 @@ state execute_state_machine(state state, pid_t pid, struct user_regs_struct regs
                             memcpy(state.buffer+6+1+16, &address->sin6_port, sizeof(uint16_t));
                         }
 
-                        // need to remake as an ipv4 socket
-                        state.reg_state = syscall_wrapper(pid, SYS_fcntl, state.sock_fd, F_GETFL, 0, 0, 0, 0);
-                        state.next = MAKE_IPV4_SOCKET;
-                        return execute_state_machine(state, pid, regs);
+                        remake_as_ipv4_socket = 1;
                     }
                 }
             }
 
-            // resume the connect call
-            regs = state.reg_state.old_regs;
-            state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
-            break;
-        }
+            if (remake_as_ipv4_socket) {
+                // need to remake as an ipv4 socket
+                state.reg_state = syscall_wrapper(pid, SYS_fcntl, state.sock_fd, F_GETFL, 0, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: fcntl() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
 
-        case POST_CONNECT: {
+                state.fcntl = rc;
+                state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: socket() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
+
+                state.reg_state = syscall_wrapper(pid, SYS_dup2, rc, state.sock_fd, 0, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: dup2() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
+
+                state.reg_state = syscall_wrapper(pid, SYS_fcntl, state.sock_fd, F_SETFL, state.fcntl, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: fcntl() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
+
+                struct sockaddr_in address;
+                address.sin_family = AF_INET;
+                address.sin_port = htons(proxy_port);
+                address.sin_addr.s_addr = proxy_host;
+
+                put_data(pid, (void*)state.original_addr_ptr, &address, sizeof(address));
+                state.reg_state = syscall_wrapper(pid, SYS_connect, state.sock_fd, state.original_addr_ptr, sizeof(struct sockaddr_in), 0, 0, 0);
+
+            } else {
+                // otherwise resume the connect call
+                regs = state.reg_state.old_regs;
+                state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
+            }
+            YIELD;
+
             rc = post_syscall(pid, state.reg_state);
             DEBUG("%i: connect() == %i\n", pid, rc);
             if ((rc < 0 && rc != -EINPROGRESS) || !state.is_tcp) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
+                goto FINISH_STATE_MACHINE;
             }
 
-            if (regs.rax < 0) {
-                set_syscall_return_code(pid, regs.rax);
-                state.next = DONE;
-            } else {
-                state.next = SEND_HANDSHAKE_POLL;
-                return execute_state_machine(state, pid, regs);
-            }
-            break;
-        }
+            while (state.buffer_len > 0) {
+                struct pollfd pollfd = {state.sock_fd, POLLOUT};
+                put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
 
-        case MAKE_IPV4_SOCKET: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: fcntl() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
+                state.reg_state = syscall_wrapper(pid, SYS_poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: poll() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
 
-            state.fcntl = rc;
-            state.reg_state = syscall_wrapper(pid, SYS_socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, 0, 0, 0);
-            state.next = DUP_IPV4_SOCKET;
-            break;
-        }
-
-        case FCNTL_IPV4_SOCKET: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: socket() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
+                int len = min(state.original_addr_len, state.buffer_len);
+                // replace with sendto
+                put_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, len);
+                state.reg_state = syscall_wrapper(pid, SYS_sendto, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: sendto() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
+                state.buffer_start += rc;
+                state.buffer_len -= rc;
             }
 
-            state.reg_state = syscall_wrapper(pid, SYS_fcntl, state.sock_fd, F_SETFL, state.fcntl, 0, 0, 0);
-            state.next = DUP_IPV4_SOCKET;
-            break;
-        }
-
-        case DUP_IPV4_SOCKET: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: fcntl() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
-
-            state.reg_state = syscall_wrapper(pid, SYS_dup2, rc, state.sock_fd, 0, 0, 0, 0);
-            state.next = CONNECT_IPV4_SOCKET;
-            break;
-        }
-
-        case CONNECT_IPV4_SOCKET: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: dup2() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
-            struct sockaddr_in address;
-            address.sin_family = AF_INET;
-            address.sin_port = htons(proxy_port);
-            address.sin_addr.s_addr = proxy_host;
-
-            put_data(pid, (void*)state.original_addr_ptr, &address, sizeof(address));
-            state.reg_state = syscall_wrapper(pid, SYS_connect, state.sock_fd, state.original_addr_ptr, sizeof(struct sockaddr_in), 0, 0, 0);
-            state.next = POST_CONNECT_IPV4;
-            break;
-        }
-
-        case POST_CONNECT_IPV4: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: connect() == %i\n", pid, rc);
-            if (rc < 0 && rc != -EINPROGRESS) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
-
-            state.next = SEND_HANDSHAKE_POLL;
-            return execute_state_machine(state, pid, regs);
-        }
-
-        case SEND_HANDSHAKE_POLL: {
-            struct pollfd pollfd = {state.sock_fd, POLLOUT};
-            put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
-
-            state.reg_state = syscall_wrapper(pid, SYS_poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
-            state.next = SEND_HANDSHAKE;
-            break;
-        }
-
-        case SEND_HANDSHAKE: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: poll() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
-
-            int len = min(state.original_addr_len, state.buffer_len);
-            // replace with sendto
-            put_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, len);
-            state.reg_state = syscall_wrapper(pid, SYS_sendto, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
-            state.next = POST_SEND_HANDSHAKE;
-            break;
-        }
-
-        case POST_SEND_HANDSHAKE: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: sendto() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
-            state.buffer_start += rc;
-            state.buffer_len -= rc;
-            if (state.buffer_len > 0) {
-                state.next = SEND_HANDSHAKE_POLL;
-                return execute_state_machine(state, pid, regs);
-            }
-            state.next = RECV_HANDSHAKE_POLL;
             state.buffer_start = 0;
             state.buffer_len = 6;
-            return execute_state_machine(state, pid, regs);
-        }
+            while (state.buffer_len > 0) {
+                struct pollfd pollfd = {state.sock_fd, POLLIN};
+                put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
 
-        case RECV_HANDSHAKE_POLL: {
-            struct pollfd pollfd = {state.sock_fd, POLLIN};
-            put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                state.reg_state = syscall_wrapper(pid, SYS_poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: poll() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                }
 
-            state.reg_state = syscall_wrapper(pid, SYS_poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
-            state.next = RECV_HANDSHAKE;
-            break;
-        }
+                int len = min(state.original_addr_len, state.buffer_len);
+                state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: handshake: recvfrom() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                } else if (rc == 0) {
+                    rc = -ECONNRESET;
+                    goto FINISH_STATE_MACHINE;
+                }
 
-        case RECV_HANDSHAKE: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: poll() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
+                get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
+                state.buffer_len -= rc;
+                state.buffer_start += rc;
             }
 
-            int len = min(state.original_addr_len, state.buffer_len);
-            state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
-            state.next = POST_RECV_HANDSHAKE;
-            break;
-        }
-
-        case POST_RECV_HANDSHAKE: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: handshake: recvfrom() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
+            if (state.buffer[0] != 0x05 || state.buffer[1] != 0x00 || state.buffer[2] != 0x05 || state.buffer[3] != 0x00 || state.buffer[4] != 0x00) {
+                rc = -ECONNRESET;
+                goto FINISH_STATE_MACHINE;
             }
-
-            if (rc == 0) {
-                set_syscall_return_code(pid, -ECONNRESET);
-                state.next = DONE;
-                break;
-            }
-
-            get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
-            state.buffer_len -= rc;
-            state.buffer_start += rc;
-
-            if (state.buffer_len == 0) {
-                if (state.buffer[0] != 0x05 || state.buffer[1] != 0x00 || state.buffer[2] != 0x05 || state.buffer[3] != 0x00 || state.buffer[4] != 0x00) {
-                    set_syscall_return_code(pid, -ECONNRESET);
-                    state.next = DONE;
+            switch (state.buffer[5]) {
+                case 0x01:
+                    state.buffer_len = 4+2;
                     break;
+                case 0x03:
+                    state.buffer_len = 1;
+                    break;
+                case 0x04:
+                    state.buffer_len = 16+2;
+                    break;
+                default:
+                    rc = -ECONNRESET;
+                    goto FINISH_STATE_MACHINE;
+            }
+            state.buffer_start = 0;
+
+            while (state.buffer_len > 0) {
+                struct pollfd pollfd = {state.sock_fd, POLLIN};
+                put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
+
+                state.reg_state = syscall_wrapper(pid, SYS_poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: poll() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
                 }
-                switch (state.buffer[5]) {
-                    case 0x01:
-                        state.buffer_len = 4+2;
-                        break;
-                    case 0x03:
-                        state.buffer_len = 1;
-                        break;
-                    case 0x04:
-                        state.buffer_len = 16+2;
-                        break;
-                    default:
-                        set_syscall_return_code(pid, -ECONNRESET);
-                        state.next = DONE;
-                        break;
+
+                // drop the data
+                int len = min(state.original_addr_len, state.buffer_len);
+                state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
+                YIELD;
+                rc = post_syscall(pid, state.reg_state);
+                DEBUG("%i: address: recvfrom() == %i\n", pid, rc);
+                if (rc < 0) {
+                    goto FINISH_STATE_MACHINE;
+                } else if (rc == 0) {
+                    rc = -ECONNRESET;
+                    goto FINISH_STATE_MACHINE;
                 }
-                state.buffer_start = 0;
-                state.next = RECV_ADDRESS_POLL;
-                return execute_state_machine(state, pid, regs);
-            } else {
-                state.next = RECV_HANDSHAKE_POLL;
-                return execute_state_machine(state, pid, regs);
-            }
-            break;
-        }
 
-        case RECV_ADDRESS_POLL: {
-            struct pollfd pollfd = {state.sock_fd, POLLIN};
-            put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
-
-            state.reg_state = syscall_wrapper(pid, SYS_poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
-            state.next = RECV_ADDRESS;
-            break;
-        }
-
-        case RECV_ADDRESS: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: poll() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
+                get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
+                state.buffer_len -= rc;
+                state.buffer_start += rc;
             }
 
-            // drop the data
-            int len = min(state.original_addr_len, state.buffer_len);
-            state.reg_state = syscall_wrapper(pid, SYS_recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
-            state.next = POST_RECV_ADDRESS;
-            break;
-        }
-
-        case POST_RECV_ADDRESS: {
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: address: recvfrom() == %i\n", pid, rc);
-            if (rc < 0) {
-                set_syscall_return_code(pid, rc);
-                state.next = DONE;
-                break;
-            }
-
-            if (rc == 0) {
-                set_syscall_return_code(pid, -ECONNRESET);
-                state.next = DONE;
-                break;
-            }
-
-            get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
-            state.buffer_len -= rc;
-            state.buffer_start += rc;
-
-            if (state.buffer_len == 0) {
-                set_syscall_return_code(pid, 0);
-                state.next = DONE;
-            } else {
-                state.next = RECV_ADDRESS_POLL;
-            }
-            break;
-        }
+            rc = 0;
+            goto FINISH_STATE_MACHINE;
 
         case DONE:
             break;
     }
 
-    if (state.next == DONE) {
-        // restore the original address, since connect() is meant to be const
-        put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
+NEXT_STATE:
+    ptrace(PTRACE_SYSCALL, pid, NULL, 0);
+    return state;
 
-        ptrace(PTRACE_CONT, pid, NULL, 0);
-    } else {
-        ptrace(PTRACE_SYSCALL, pid, NULL, 0);
-    }
+FINISH_STATE_MACHINE:
+    // restore the original address, since connect() is meant to be const
+    put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
+    state.next = DONE;
+    set_syscall_return_code(pid, rc);
+    ptrace(PTRACE_CONT, pid, NULL, 0);
     return state;
 }
 
