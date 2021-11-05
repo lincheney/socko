@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+lib="$(readlink -f "$(dirname "$0")/sockolib.so")"
+SOCKO_PROXY="$1"
+shift
+LD_PRELOAD="$lib:$LD_PRELOAD" SOCKO_PROXY="$SOCKO_PROXY" bash -c 'exec "$@"' -- "$@"

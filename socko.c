@@ -624,8 +624,8 @@ __attribute__((constructor))
 static void init(int argc, const char **argv) {
     real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
 
-    const char* socking_enabled = getenv("SOCKING_ENABLED");
-    if (socking_enabled && strcmp(socking_enabled, "1") == 0) {
+    const char* socko_enabled = getenv("SOCKO_ENABLED");
+    if (socko_enabled && strcmp(socko_enabled, "1") == 0) {
         // we are already being ptraced ...
         hijack_dns = 1;
         return;
@@ -633,16 +633,16 @@ static void init(int argc, const char **argv) {
 
     // ... otherwise we need to fork and ptrace
 
-    const char* socking_proxy = getenv("SOCKING_PROXY");
-    if (!socking_proxy) {
-        /* dprintf(2, "Error: $SOCKING_PROXY has not been set\n"); */
+    const char* socko_proxy = getenv("SOCKO_PROXY");
+    if (!socko_proxy) {
+        /* dprintf(2, "Error: $SOCKO_PROXY has not been set\n"); */
         return;
     }
-    char* proxy = strdup(socking_proxy);
+    char* proxy = strdup(socko_proxy);
     char* host = strtok(proxy, ":");
     char* port = strtok(NULL, "");
     if (!host || !port || sscanf(port, "%hu", &proxy_port) != 1 || inet_pton(AF_INET, host, &proxy_host) != 1) {
-        dprintf(2, "Error: invalid $SOCKING_PROXY: %s\n", socking_proxy);
+        dprintf(2, "Error: invalid $SOCKO_PROXY: %s\n", socko_proxy);
         return;
     }
     free(proxy);
@@ -673,7 +673,7 @@ static void init(int argc, const char **argv) {
         for (env_length = 0; environ[env_length]; env_length++) ;
         char* new_env[env_length+3];
         memcpy(new_env, environ, sizeof(char*)*env_length);
-        new_env[env_length] = "SOCKING_ENABLED=1";
+        new_env[env_length] = "SOCKO_ENABLED=1";
         /* new_env[env_length+1] = ld_preload; */
         new_env[env_length+2] = NULL;
 

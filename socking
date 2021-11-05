@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-
-lib="$(readlink -f "$(dirname "$0")/sockinglib.so")"
-SOCKING_PROXY="$1"
-shift
-LD_PRELOAD="$lib:$LD_PRELOAD" SOCKING_PROXY="$SOCKING_PROXY" bash -c 'exec "$@"' -- "$@"

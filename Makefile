@@ -1,10 +1,10 @@
-BINARY=socking
-LIBRARY=sockinglib.so
+BINARY=socko
+LIBRARY=sockolib.so
 
 all: ${LIBRARY}
 
-# ${BINARY}: socking.c array.c shared.h
-	# gcc socking.c -o $@
+# ${BINARY}: socko.c array.c shared.h
+	# gcc socko.c -o $@
 
-${LIBRARY}: array.h socking.c
-	gcc socking.c -o $@ -ldl -lseccomp -fPIC -shared
+${LIBRARY}: array.h socko.c
+	gcc socko.c -o $@ -ldl -lseccomp -fPIC -shared
