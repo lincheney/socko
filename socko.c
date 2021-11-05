@@ -155,14 +155,8 @@ void* put_data(pid_t pid, void* addr, void* buffer, int count) {
     return addr + count;
 }
 
-register_state_t syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
-    register_state_t state;
+void syscall_wrapper(process_state_t state, size_t syscall, size_t arg0, size_t arg1, size_t arg2, size_t arg3, size_t arg4, size_t arg5) {
     registers regs;
-
-    // get initial registers
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-    state.old_regs = regs;
-
     // populate new registers
     regs.orig_rax = syscall;
     regs.rax = syscall;
@@ -172,40 +166,9 @@ register_state_t syscall_wrapper(pid_t pid, size_t syscall, size_t arg0, size_t 
     regs.r10 = arg3;
     regs.r8 = arg4;
     regs.r9 = arg5;
-    regs.rip -= sizeof(instruction_t);
-
-    // get initial RIP
-    get_data(pid, (void*)regs.rip, &state.rip, sizeof(instruction_t));
-    if (state.rip != SYSCALL) {
-        // set RIP
-        instruction_t newrip = 0x050f;
-        put_data(pid, (void*)regs.rip, &newrip, sizeof(instruction_t));
-    }
-
+    regs.rip = state.reg_state.old_regs.rip - sizeof(instruction_t);
     // set the registers
-    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-
-    return state;
-}
-
-size_t post_syscall(pid_t pid, register_state_t state) {
-    registers regs;
-    // restore RIP
-    if (state.rip != SYSCALL) {
-        put_data(pid, (void*)state.old_regs.rip, &state.rip, sizeof(instruction_t));
-    }
-    // return
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-    // restore registers
-    ptrace(PTRACE_SETREGS, pid, NULL, &state.old_regs);
-    return regs.rax;
-}
-
-void set_syscall_return_code(pid_t pid, int rc) {
-    registers regs;
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-    regs.rax = rc;
-    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+    ptrace(PTRACE_SETREGS, state.pid, NULL, &regs);
 }
 
 /*
@@ -217,7 +180,7 @@ void set_syscall_return_code(pid_t pid, int rc) {
  * only problem is all function local variables will be lost/reset on each YIELD
  * anything that needs to be kept needs to be persisted into the state
  */
-process_state_t execute_state_machine(process_state_t state, pid_t pid, struct user_regs_struct regs) {
+process_state_t execute_state_machine(process_state_t state, struct user_regs_struct regs) {
 
 #define START -1
 #define DONE -2
@@ -229,10 +192,10 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
 #define YIELD YIELD_IMPL(__COUNTER__)
 
 #define YIELD_SYSCALL(syscall, ...) \
-    state.reg_state = syscall_wrapper(pid, SYS_ ## syscall, __VA_ARGS__); \
+    syscall_wrapper(state, SYS_ ## syscall, __VA_ARGS__); \
     YIELD; \
-    rc = post_syscall(pid, state.reg_state); \
-    DEBUG("%i: " #syscall "() == %i\n", pid, rc); \
+    rc = regs.rax; \
+    DEBUG("%i: " #syscall "() == %i\n", state.pid, rc); \
     if (rc < 0) goto FINISH_STATE_MACHINE; \
 
 
@@ -246,18 +209,31 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
             state.sock_fd = regs.rdi;
             state.original_addr_ptr = (void*)regs.rsi;
             state.original_addr_len = regs.rdx;
-            get_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
+            // save all the data so we can restore it later
+            state.reg_state.old_regs = regs;
+            get_data(state.pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
+
+            // get the old rip
+            void* rip = (void*)regs.rip - sizeof(instruction_t);
+            get_data(state.pid, rip, &state.reg_state.rip, sizeof(instruction_t));
+
+            // now overwrite the rip with syscall
+            if (state.reg_state.rip != SYSCALL) {
+                // set RIP
+                instruction_t newrip = SYSCALL;
+                put_data(state.pid, rip, &newrip, sizeof(instruction_t));
+            }
 
             int len = sizeof(uint32_t);
-            put_data(pid, state.original_addr_ptr+len, &len, sizeof(len));
+            put_data(state.pid, state.original_addr_ptr+len, &len, sizeof(len));
 
             YIELD_SYSCALL(getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, (size_t)state.original_addr_ptr, (size_t)state.original_addr_ptr+len, 0);
 
             // get the sock type
             uint32_t type = 0;
-            get_data(pid, state.original_addr_ptr, &type, sizeof(uint32_t));
+            get_data(state.pid, state.original_addr_ptr, &type, sizeof(uint32_t));
             // then restore the original address
-            put_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
+            put_data(state.pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
 
             int remake_as_ipv4_socket = 0;
 
@@ -288,7 +264,7 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
 
                         address->sin_addr.s_addr = proxy_host;
                         address->sin_port = htons(proxy_port);
-                        put_data(pid, state.original_addr_ptr, address_buffer, state.original_addr_len);
+                        put_data(state.pid, state.original_addr_ptr, address_buffer, state.original_addr_len);
                         break;
                     }
 
@@ -301,7 +277,7 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
                             state.buffer_len += 2 + (data->len-1) + sizeof(uint16_t);
                             state.buffer[6] = 0x03;
                             state.buffer[7] = data->len-1;
-                            get_data(pid, data->name_ptr, state.buffer+6+2, data->len-1);
+                            get_data(state.pid, data->name_ptr, state.buffer+6+2, data->len-1);
                             memcpy(state.buffer+6+2+(data->len-1), &address->sin6_port, sizeof(uint16_t));
 
                         } else {
@@ -329,30 +305,32 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
                 address.sin_port = htons(proxy_port);
                 address.sin_addr.s_addr = proxy_host;
 
-                put_data(pid, state.original_addr_ptr, &address, sizeof(address));
-                state.reg_state = syscall_wrapper(pid, SYS_connect, state.sock_fd, (size_t)state.original_addr_ptr, sizeof(address), 0, 0, 0);
+                put_data(state.pid, state.original_addr_ptr, &address, sizeof(address));
+                syscall_wrapper(state, SYS_connect, state.sock_fd, (size_t)state.original_addr_ptr, sizeof(address), 0, 0, 0);
 
             } else {
                 // otherwise resume the connect call
-                regs = state.reg_state.old_regs;
-                state.reg_state = syscall_wrapper(pid, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9);
+                /* regs = state.reg_state.old_regs; */
+                syscall_wrapper(state, SYS_connect, state.sock_fd, (size_t)state.original_addr_ptr, state.original_addr_len, 0, 0, 0);
+                /* syscall_wrapper(state, regs.orig_rax, regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9); */
             }
             YIELD;
 
-            rc = post_syscall(pid, state.reg_state);
-            DEBUG("%i: connect() == %i\n", pid, rc);
+            rc = regs.rax;
+            DEBUG("%i: connect() == %i\n", state.pid, rc);
             if ((rc < 0 && rc != -EINPROGRESS) || !state.is_tcp) {
+                rc = (rc >= 0 ? -ECONNRESET : rc);
                 goto FINISH_STATE_MACHINE;
             }
 
             while (state.buffer_len > 0) {
                 struct pollfd pollfd = {state.sock_fd, POLLOUT};
-                put_data(pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                put_data(state.pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
                 YIELD_SYSCALL(poll, (size_t)state.original_addr_ptr, 1, -1, 0, 0, 0);
 
                 int len = min(state.original_addr_len, state.buffer_len);
                 // replace with sendto
-                put_data(pid, state.original_addr_ptr, state.buffer+state.buffer_start, len);
+                put_data(state.pid, state.original_addr_ptr, state.buffer+state.buffer_start, len);
                 YIELD_SYSCALL(sendto, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
 
                 state.buffer_start += rc;
@@ -363,7 +341,7 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
             state.buffer_len = 6;
             while (state.buffer_len > 0) {
                 struct pollfd pollfd = {state.sock_fd, POLLIN};
-                put_data(pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                put_data(state.pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
 
                 YIELD_SYSCALL(poll, (size_t)state.original_addr_ptr, 1, -1, 0, 0, 0);
 
@@ -373,7 +351,7 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
                     goto FAIL_STATE_MACHINE;
                 }
 
-                get_data(pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
+                get_data(state.pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
                 state.buffer_len -= rc;
                 state.buffer_start += rc;
             }
@@ -397,7 +375,7 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
 
             while (state.buffer_len > 0) {
                 struct pollfd pollfd = {state.sock_fd, POLLIN};
-                put_data(pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                put_data(state.pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
 
                 YIELD_SYSCALL(poll, (size_t)state.original_addr_ptr, 1, -1, 0, 0, 0);
 
@@ -408,7 +386,7 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
                     goto FAIL_STATE_MACHINE;
                 }
 
-                get_data(pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
+                get_data(state.pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
                 state.buffer_len -= rc;
                 state.buffer_start += rc;
             }
@@ -421,23 +399,32 @@ process_state_t execute_state_machine(process_state_t state, pid_t pid, struct u
     }
 
 state_STATE:
-    ptrace(PTRACE_SYSCALL, pid, NULL, 0);
+    ptrace(PTRACE_SYSCALL, state.pid, NULL, 0);
     return state;
 
 FAIL_STATE_MACHINE:
     rc = -ECONNRESET;
 FINISH_STATE_MACHINE:
     // restore the original address, since connect() is meant to be const
-    put_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
+    put_data(state.pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
+    // set the return code
+    regs = state.reg_state.old_regs;
+    regs.rax = rc;
+    // restore registers
+    ptrace(PTRACE_SETREGS, state.pid, NULL, &regs);
+    // restore RIP
+    if (state.reg_state.rip != SYSCALL) {
+        put_data(state.pid, (void*)(regs.rip-sizeof(instruction_t)), &state.reg_state.rip, sizeof(instruction_t));
+    }
+
     state.state = DONE;
-    set_syscall_return_code(pid, rc);
-    ptrace(PTRACE_CONT, pid, NULL, 0);
+    ptrace(PTRACE_CONT, state.pid, NULL, 0);
     return state;
 }
 
-void handle_process(int index, pid_t pid, registers regs) {
+void handle_process(int index, registers regs) {
     process_state_t oldstate = processes.data[index];
-    process_state_t newstate = execute_state_machine(oldstate, pid, regs);
+    process_state_t newstate = execute_state_machine(oldstate, regs);
     processes.data[index] = newstate;
 }
 
@@ -602,7 +589,7 @@ static void init(int argc, const char **argv) {
 
         registers regs;
         ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-        handle_process(process_index, pid, regs);
+        handle_process(process_index, regs);
     }
     exit(rc);
 }
