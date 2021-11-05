@@ -67,7 +67,7 @@ typedef struct {
 
     char original_address[256];
     size_t original_addr_len;
-    size_t original_addr_ptr;
+    void* original_addr_ptr;
 
     register_state_t reg_state;
     int to_receive;
@@ -246,20 +246,20 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
             state.is_tcp = 0;
 
             state.sock_fd = regs.rdi;
-            state.original_addr_ptr = regs.rsi;
+            state.original_addr_ptr = (void*)regs.rsi;
             state.original_addr_len = regs.rdx;
-            get_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
+            get_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
 
             int len = sizeof(uint32_t);
-            put_data(pid, (void*)state.original_addr_ptr+len, &len, sizeof(len));
+            put_data(pid, state.original_addr_ptr+len, &len, sizeof(len));
 
-            YIELD_SYSCALL(getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, state.original_addr_ptr, state.original_addr_ptr+len, 0);
+            YIELD_SYSCALL(getsockopt, state.sock_fd, SOL_SOCKET, SO_TYPE, (size_t)state.original_addr_ptr, (size_t)state.original_addr_ptr+len, 0);
 
             // get the sock type
             uint32_t type = 0;
-            get_data(pid, (void*)state.original_addr_ptr, &type, sizeof(uint32_t));
+            get_data(pid, state.original_addr_ptr, &type, sizeof(uint32_t));
             // then restore the original address
-            put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
+            put_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
 
             int remake_as_ipv4_socket = 0;
 
@@ -290,7 +290,7 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
 
                         address->sin_addr.s_addr = proxy_host;
                         address->sin_port = htons(proxy_port);
-                        put_data(pid, (void*)state.original_addr_ptr, address_buffer, state.original_addr_len);
+                        put_data(pid, state.original_addr_ptr, address_buffer, state.original_addr_len);
                         break;
                     }
 
@@ -331,8 +331,8 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
                 address.sin_port = htons(proxy_port);
                 address.sin_addr.s_addr = proxy_host;
 
-                put_data(pid, (void*)state.original_addr_ptr, &address, sizeof(address));
-                state.reg_state = syscall_wrapper(pid, SYS_connect, state.sock_fd, state.original_addr_ptr, sizeof(struct sockaddr_in), 0, 0, 0);
+                put_data(pid, state.original_addr_ptr, &address, sizeof(address));
+                state.reg_state = syscall_wrapper(pid, SYS_connect, state.sock_fd, (size_t)state.original_addr_ptr, sizeof(address), 0, 0, 0);
 
             } else {
                 // otherwise resume the connect call
@@ -349,12 +349,12 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
 
             while (state.buffer_len > 0) {
                 struct pollfd pollfd = {state.sock_fd, POLLOUT};
-                put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
-                YIELD_SYSCALL(poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
+                put_data(pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                YIELD_SYSCALL(poll, (size_t)state.original_addr_ptr, 1, -1, 0, 0, 0);
 
                 int len = min(state.original_addr_len, state.buffer_len);
                 // replace with sendto
-                put_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, len);
+                put_data(pid, state.original_addr_ptr, state.buffer+state.buffer_start, len);
                 YIELD_SYSCALL(sendto, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
 
                 state.buffer_start += rc;
@@ -365,17 +365,17 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
             state.buffer_len = 6;
             while (state.buffer_len > 0) {
                 struct pollfd pollfd = {state.sock_fd, POLLIN};
-                put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                put_data(pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
 
-                YIELD_SYSCALL(poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
+                YIELD_SYSCALL(poll, (size_t)state.original_addr_ptr, 1, -1, 0, 0, 0);
 
                 int len = min(state.original_addr_len, state.buffer_len);
-                YIELD_SYSCALL(recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
+                YIELD_SYSCALL(recvfrom, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
                 if (rc == 0) {
                     goto FAIL_STATE_MACHINE;
                 }
 
-                get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
+                get_data(pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
                 state.buffer_len -= rc;
                 state.buffer_start += rc;
             }
@@ -399,18 +399,18 @@ state_t execute_state_machine(state_t state, pid_t pid, struct user_regs_struct 
 
             while (state.buffer_len > 0) {
                 struct pollfd pollfd = {state.sock_fd, POLLIN};
-                put_data(pid, (void*)state.original_addr_ptr, &pollfd, sizeof(pollfd));
+                put_data(pid, state.original_addr_ptr, &pollfd, sizeof(pollfd));
 
-                YIELD_SYSCALL(poll, state.original_addr_ptr, 1, -1, 0, 0, 0);
+                YIELD_SYSCALL(poll, (size_t)state.original_addr_ptr, 1, -1, 0, 0, 0);
 
                 // drop the data
                 int len = min(state.original_addr_len, state.buffer_len);
-                YIELD_SYSCALL(recvfrom, state.sock_fd, state.original_addr_ptr, len, 0, 0, 0);
+                YIELD_SYSCALL(recvfrom, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
                 if (rc == 0) {
                     goto FAIL_STATE_MACHINE;
                 }
 
-                get_data(pid, (void*)state.original_addr_ptr, state.buffer+state.buffer_start, rc);
+                get_data(pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
                 state.buffer_len -= rc;
                 state.buffer_start += rc;
             }
@@ -430,7 +430,7 @@ FAIL_STATE_MACHINE:
     rc = -ECONNRESET;
 FINISH_STATE_MACHINE:
     // restore the original address, since connect() is meant to be const
-    put_data(pid, (void*)state.original_addr_ptr, state.original_address, state.original_addr_len);
+    put_data(pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
     state.next = DONE;
     set_syscall_return_code(pid, rc);
     ptrace(PTRACE_CONT, pid, NULL, 0);
