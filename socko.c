@@ -186,7 +186,7 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
 #define DONE -2
 #define YIELD_IMPL(counter) \
     state.state = counter; \
-    goto state_STATE; \
+    goto NEXT_STATE; \
     case counter: \
 
 #define YIELD YIELD_IMPL(__COUNTER__)
@@ -398,7 +398,7 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
             break;
     }
 
-state_STATE:
+NEXT_STATE:
     ptrace(PTRACE_SYSCALL, state.pid, NULL, 0);
     return state;
 
