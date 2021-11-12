@@ -20,11 +20,8 @@
 
 #include "array.h"
 
-#define WORD_SIZE sizeof(size_t)
-#define ALIGNED_SIZE(x) ((x) + (x) % -WORD_SIZE)
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define min(a, b) ((a) < (b) ? (a) : (b))
-#define POLLFD_SIZE ALIGNED_SIZE(sizeof(struct pollfd))
 #define SYSCALL 0x050f
 typedef uint16_t instruction_t;
 
