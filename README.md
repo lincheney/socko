@@ -24,7 +24,7 @@ e.g. `./socko 127.0.0.1:5555 curl google.com`
 
 Or have it hijack all new processes in your shell:
 1. Open a shell, `bash` or `zsh`
-1. Run: `export SOCK_PROXY=PROXY_HOST:PROXY_PORT`
+1. Run: `export SOCKO_PROXY=PROXY_HOST:PROXY_PORT`
 1. Run: `export LD_PRELOAD="$PWD/sockolib.so:$LD_PRELOAD"`
 1. Run further commands as normal, e.g. `curl google.com`
 
