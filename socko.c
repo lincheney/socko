@@ -510,7 +510,7 @@ static void init(int argc, const char **argv) {
     int rc = 0;
     while (1) {
         int status;
-        pid_t pid = waitpid(-1, &status, 0);
+        pid_t pid = wait(&status);
 
         if (pid < 0 && errno == ECHILD) {
             break;
@@ -519,9 +519,9 @@ static void init(int argc, const char **argv) {
             exit(1);
         }
 
-        if (WIFEXITED(status)) {
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
             if (pid == child) {
-                rc = WEXITSTATUS(status);
+                rc = WIFEXITED(status) ? WEXITSTATUS(status) : 255;
             }
 
             // process exited
