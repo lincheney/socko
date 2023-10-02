@@ -210,6 +210,14 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
             state.reg_state.old_regs = regs;
             get_data(state.pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
 
+            sa_family_t family = ((struct sockaddr*)state.original_address)->sa_family;
+            if (family == AF_LOCAL) {
+                DEBUG("skipping local socket\n");
+                state.state = DONE;
+                ptrace(PTRACE_CONT, state.pid, NULL, 0);
+                return state;
+            }
+
             // get the old rip
             void* rip = (void*)regs.rip - sizeof(instruction_t);
             get_data(state.pid, rip, &state.reg_state.rip, sizeof(instruction_t));
