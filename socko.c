@@ -211,11 +211,17 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
             get_data(state.pid, state.original_addr_ptr, state.original_address, state.original_addr_len);
 
             sa_family_t family = ((struct sockaddr*)state.original_address)->sa_family;
-            if (family == AF_LOCAL) {
-                DEBUG("skipping local socket\n");
-                state.state = DONE;
-                ptrace(PTRACE_CONT, state.pid, NULL, 0);
-                return state;
+            switch (family) {
+                case AF_LOCAL: {
+                    DEBUG("skipping local socket\n");
+                    goto FINISH_STATE_MACHINE;
+                }
+                case AF_INET:
+                case AF_INET6:
+                    break;
+                default:
+                    DEBUG("unknown family\n");
+                    goto FAIL_STATE_MACHINE;
             }
 
             // get the old rip
@@ -242,21 +248,32 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
 
             int remake_as_ipv4_socket = 0;
 
-            if (type == SOCK_STREAM) {
+            if (type == SOCK_STREAM || type == SOCK_DGRAM) {
                 state.is_tcp = 1;
 
                 struct sockaddr* address_buffer = alloca(state.original_addr_len);
                 memcpy(address_buffer, state.original_address, state.original_addr_len);
 
                 state.buffer_start = 0;
-                memcpy(state.buffer,
-                    "\x05" // version
-                    "\x01" // no. auth
-                    "\x00" // noauth
-                    "\x05" // version
-                    "\x01" // command
-                    "\x00" // reserved
-                    , 6);
+                if (type == SOCK_STREAM) {
+                    memcpy(state.buffer,
+                        "\x05" // version
+                        "\x01" // no. auth
+                        "\x00" // noauth
+                        "\x05" // version
+                        "\x01" // command
+                        "\x00" // reserved
+                        , 6);
+                } else {
+                    memcpy(state.buffer,
+                        "\x05" // version
+                        "\x01" // no. auth
+                        "\x00" // noauth
+                        "\x05" // version
+                        "\x01" // command
+                        "\x00" // reserved
+                        , 6);
+                }
                 state.buffer_len = 6;
 
                 switch (address_buffer->sa_family) {
@@ -295,6 +312,9 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
                         remake_as_ipv4_socket = 1;
                     }
                 }
+            } else {
+                DEBUG("skipping unknown type\n");
+                goto FAIL_STATE_MACHINE;
             }
 
             if (remake_as_ipv4_socket) {

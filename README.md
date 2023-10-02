@@ -51,7 +51,6 @@ it will use that pointer to retrieve the hostname from the memory of the child p
 * did I say it's supported only on my computer?
 * it's a massive hack
 * works only on x86-64
-* works only with TCP
 * works only with proxies on IPv4
 * does not support any SOCKS 5 authentication (apart from no authentication)
 * almost definitely not threadsafe
