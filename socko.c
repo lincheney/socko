@@ -255,25 +255,24 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
                 memcpy(address_buffer, state.original_address, state.original_addr_len);
 
                 state.buffer_start = 0;
-                if (type == SOCK_STREAM) {
-                    memcpy(state.buffer,
+                memcpy(state.buffer,
+                    (type == SOCK_STREAM) ?
+                    (
                         "\x05" // version
                         "\x01" // no. auth
                         "\x00" // noauth
                         "\x05" // version
-                        "\x01" // command
+                        "\x01" // command (TCP)
                         "\x00" // reserved
-                        , 6);
-                } else {
-                    memcpy(state.buffer,
+                    ) : (
                         "\x05" // version
                         "\x01" // no. auth
                         "\x00" // noauth
                         "\x05" // version
-                        "\x01" // command
+                        "\x03" // command (UDP)
                         "\x00" // reserved
-                        , 6);
-                }
+                    ),
+                6);
                 state.buffer_len = 6;
 
                 switch (address_buffer->sa_family) {
