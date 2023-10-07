@@ -372,7 +372,7 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
                 int len = min(state.original_addr_len, state.buffer_len);
                 YIELD_SYSCALL(recvfrom, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
                 if (rc == 0) {
-                    goto FAIL_STATE_MACHINE;
+                    goto SHUTDOWN_AND_FAIL_STATE_MACHINE;
                 }
 
                 get_data(state.pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
@@ -381,19 +381,19 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
             }
 
             if (state.buffer[0] != 0x05 || state.buffer[1] != 0x00 || state.buffer[2] != 0x05 || state.buffer[3] != 0x00 || state.buffer[4] != 0x00) {
-                goto FAIL_STATE_MACHINE;
+                goto SHUTDOWN_AND_FAIL_STATE_MACHINE;
             }
             switch (state.buffer[5]) {
                 case 0x01:
                     state.buffer_len = 4+2;
                     break;
                 case 0x03:
-                    goto FAIL_STATE_MACHINE;
+                    goto SHUTDOWN_AND_FAIL_STATE_MACHINE;
                 case 0x04:
                     state.buffer_len = 16+2;
                     break;
                 default:
-                    goto FAIL_STATE_MACHINE;
+                    goto SHUTDOWN_AND_FAIL_STATE_MACHINE;
             }
             state.buffer_start = 0;
 
@@ -407,7 +407,7 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
                 int len = min(state.original_addr_len, state.buffer_len);
                 YIELD_SYSCALL(recvfrom, state.sock_fd, (size_t)state.original_addr_ptr, len, 0, 0, 0);
                 if (rc == 0) {
-                    goto FAIL_STATE_MACHINE;
+                    goto SHUTDOWN_AND_FAIL_STATE_MACHINE;
                 }
 
                 get_data(state.pid, state.original_addr_ptr, state.buffer+state.buffer_start, rc);
@@ -417,6 +417,10 @@ process_state_t execute_state_machine(process_state_t state, struct user_regs_st
 
             rc = 0;
             goto FINISH_STATE_MACHINE;
+
+SHUTDOWN_AND_FAIL_STATE_MACHINE:
+            YIELD_SYSCALL(shutdown, state.sock_fd, SHUT_RDWR, 0, 0, 0, 0);
+            goto FAIL_STATE_MACHINE;
 
         case DONE:
             break;
